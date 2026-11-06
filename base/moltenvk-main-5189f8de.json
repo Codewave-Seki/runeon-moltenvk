@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "baseId": "moltenvk-main-5189f8de",
+  "repository": "https://github.com/KhronosGroup/MoltenVK.git",
+  "tag": null,
+  "commit": "5189f8de86ec365860f63bf1da736815cfaea5cd",
+  "describe": "v1.4.2-58-g5189f8de",
+  "dependencies": "Pinned by the ExternalRevisions directory of this commit, fetched by its ./fetchDependencies",
+  "license": "Apache-2.0"
+}
