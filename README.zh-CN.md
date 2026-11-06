@@ -9,7 +9,7 @@
 ## 基线与当前补丁集
 
 - 上游基线：MoltenVK `main` 的 `5189f8de`（`v1.4.2-58-g5189f8de`），固定在 [`base/moltenvk-main-5189f8de.json`](base/moltenvk-main-5189f8de.json)。依赖遵循其 `ExternalRevisions`
-- 当前补丁集：[`1.4.2-patched.1`](patchsets/1.4.2-patched.1/manifest.json)，共 8 个补丁，尚未发布。ID 保留上游最后一个发布版本；源码自身的版本常量为 1.4.3，上游尚未发布该版本
+- 当前补丁集：[`1.4.2-patched.1`](patchsets/1.4.2-patched.1/manifest.json)，共 8 个补丁。其 Git tag 是下游所用构建的源码依据；不提供二进制 Release。ID 保留上游最后一个发布版本；源码自身的版本常量为 1.4.3，上游尚未发布该版本
 - 审查记录：见 [MAINTENANCE.md](MAINTENANCE.md#review-records)
 
 ## 仓库结构

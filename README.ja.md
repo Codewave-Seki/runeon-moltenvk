@@ -9,7 +9,7 @@
 ## ベースラインと現在のパッチセット
 
 - 上流ベース：MoltenVK `main` の `5189f8de`（`v1.4.2-58-g5189f8de`）。[`base/moltenvk-main-5189f8de.json`](base/moltenvk-main-5189f8de.json) に固定しています。依存関係はその `ExternalRevisions` に従います
-- 現在のパッチセット：[`1.4.2-patched.1`](patchsets/1.4.2-patched.1/manifest.json)。パッチ 8 件、未リリースです。ID は上流の最新リリースを保持します。ソース自体のバージョン定数は 1.4.3 ですが、上流はまだリリースしていません
+- 現在のパッチセット：[`1.4.2-patched.1`](patchsets/1.4.2-patched.1/manifest.json)。パッチ 8 件。その Git タグが、下流で使われるビルドのソースの正式な記録です。バイナリの Release は提供しません。ID は上流の最新リリースを保持します。ソース自体のバージョン定数は 1.4.3 ですが、上流はまだリリースしていません
 - レビュー：[MAINTENANCE.md](MAINTENANCE.md#review-records) を参照してください
 
 ## リポジトリ構成

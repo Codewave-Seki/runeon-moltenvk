@@ -9,7 +9,7 @@ A patched [MoltenVK](https://github.com/KhronosGroup/MoltenVK): a pinned upstrea
 ## Baseline and current patch set
 
 - Upstream base: MoltenVK `main` at `5189f8de` (`v1.4.2-58-g5189f8de`), pinned in [`base/moltenvk-main-5189f8de.json`](base/moltenvk-main-5189f8de.json). Dependencies follow its `ExternalRevisions`
-- Current patch set: [`1.4.2-patched.1`](patchsets/1.4.2-patched.1/manifest.json), with 8 patches, not released. The ID keeps the last upstream release; the source's own version constant says 1.4.3, which upstream has not released
+- Current patch set: [`1.4.2-patched.1`](patchsets/1.4.2-patched.1/manifest.json), with 8 patches. Its Git tag is the source of record for builds consumed downstream; there are no binary Releases. The ID keeps the last upstream release; the source's own version constant says 1.4.3, which upstream has not released
 - Reviewed: see [MAINTENANCE.md](MAINTENANCE.md#review-records)
 
 ## Repository layout

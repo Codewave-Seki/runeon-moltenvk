@@ -43,6 +43,6 @@ Documented exceptions to one switch per behaviour change:
 
 ## Release policy
 
-No Release is planned. Scripts that package source and patch-set bundles get added before the first Release. The repository never contains a MoltenVK source tree or a built dylib.
+A patch set's annotated Git tag, named after its ID, is the source of record for builds consumed downstream. There are no binary Releases: `scripts/build.sh` at the tag rebuilds the dylib. The repository never contains a MoltenVK source tree or a built dylib.
 
 Pushing, tagging and publishing are explicit maintainer decisions.
