@@ -26,10 +26,12 @@ Small local checks of this series (a program that creates `VkInstance` and `VkDe
 
 | Check | Fork | This series |
 |---|---|---|
-| Indirect-count draws, 300 real of `maxDrawCount` 1000, same command buffer submitted twice, drawn columns counted | 256 and 256 (a raised cap never reached it) | 256 and 300 |
+| Indirect-count draws, 300 real of `maxDrawCount` 1000, same command buffer submitted twice, drawn columns counted | 256 and 256 (a raised cap never reached it) | 300 and 300 (at or below the threshold, as the base) |
+| The same with `maxDrawCount` 2000 | Not recorded | 256 and 300: the first submission loses 44 draws; for a one-shot command they are lost for good |
 | The same, indexed, triangle-fan and within-cap variants, hoisting on and off, with Metal API validation | Not compared | Every count correct, no validation errors |
 | 2000 order-sensitive dispatches with compute barriers, `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0` | Wrong result | Correct result |
 | The same with argument buffers, also with `vkCmdDispatchIndirect` and a `DRAW_INDIRECT` barrier | Correct result | Correct result |
+| 3000 iterations of present then destroying the swapchain without waiting (invalid use) | Not run. The base crashes in `MVKSwapchain::beginPresentation` | Completes without a crash, three runs |
 | Converted MSL of one small shader per stage, from `MVK_CONFIG_SHADER_DUMP_DIR` | Not compared | `optnone` removed from `spvFMul` in fragment and compute, kept in vertex |
 | The draw clamp as a standalone C++ check | Not compared | Holds for the cases tried, including near `UINT32_MAX` |
 
@@ -39,13 +41,13 @@ Not run locally: tessellated draws, so `0102`'s sizing and the clamp inside the 
 
 | Patch | Author | Source | Behaviour | Modifications |
 |---|---|---|---|---|
-| `0101` | Dirk Fortmeier | `a58d6bcf04` | Present from the completed-handler | Notice comment added; `Docs/Whats_New.md` hunk dropped |
-| `0102` | nivogli | `a6289be3`, `bb88c75c` | Tessellation scratch sizes from reflection; indirect draw clamp | Statistics and completion handler dropped; budget variable removed; 64-bit lengths; switch added |
-| `0103` | nivogli | `49a7b097`, `2babf427` | Compute-sourced barriers stay in the encoder | One switch; shared predicate; only over dispatch work; a following `vkCmdDispatchIndirect` ends the encoder if the barrier covers indirect arguments |
+| `0101` | Dirk Fortmeier | `a58d6bcf04` | Present from the completed-handler | `_swapchain` and `_device` guarded by `_detachmentLock` in `beginPresentation()`, as the handler can outrun an unwaited swapchain destruction; comment corrected for single-queue semaphores; notice comment added; `Docs/Whats_New.md` hunk dropped |
+| `0102` | nivogli | `a6289be3`, `bb88c75c` | Tessellation scratch sizes from reflection; indirect draw clamp | Statistics and completion handler dropped; budget variable removed; 64-bit lengths; switch added; simpler reflection interface |
+| `0103` | nivogli | `49a7b097`, `2babf427` | Compute-sourced barriers stay in the encoder | One switch; shared predicate; only over dispatch work; a following `vkCmdDispatchIndirect` ends the encoder if the barrier covers indirect arguments (`DRAW_INDIRECT`, `ALL_GRAPHICS` or `ALL_COMMANDS`) |
 | `0104` | nivogli | `71bf4b4e` | `TOP_OF_PIPE` and `BOTTOM_OF_PIPE` as no stages | Same scope as the source commit: only the decision in `0103` |
 | `0105` | nivogli | `9674c5bd` | Concurrent `vkCmdDispatch` encoders | Only when barriers are honoured: the source made the encoder concurrent regardless, a data race without argument buffers or a residency set |
 | `0106` | nivogli | `3bf6ffe6`, from enshrouded-mac-perfmod | Precise-math helpers without `optnone` | Decided from the Vulkan stage in `MVKShaderModule::convert()` instead of matching `\nvertex ` in text, which missed tessellation stages. Fragment and GLCompute only; vertex and tessellation stages keep theirs because their conversion options carry their own stage |
-| `0107` | nivogli | `08e692dc`, `5546b028`, `96793f1d`, part of `d496ec14` | Indirect-count draw cap, self-correcting | Read at encode time instead of `setContent()`; one count per encode; no statistics; no upper limit; other devices uncapped |
+| `0107` | nivogli | `08e692dc`, `5546b028`, `96793f1d`, part of `d496ec14` | Indirect-count draw cap, self-correcting | Applies only above `maxDrawCount` 1024; read at encode time instead of `setContent()`; one count per encode; no statistics; no upper limit; other devices uncapped; raises log a MoltenVK warning |
 | `0108` | nivogli | `d9503da3` | Conversion before dynamic rendering | Records the count each conversion was sized for; also stops at `vkCmdWaitEvents` and `vkCmdExecuteCommands` |
 
 ### Left out
@@ -61,6 +63,8 @@ Not run locally: tessellated draws, so `0102`'s sizing and the clamp inside the 
 
 ### Known residuals
 
-- `0107`: the first time a real count exceeds the cap, draws can be missing until the raise takes effect (one submission per doubling in the local check).
+- `0107`: a one-shot indirect-count command with `maxDrawCount` above 1024 and a real count above the cap loses those draws permanently. A repeated command loses them on each submission until a raised cap covers its real count, then recovers (one submission per doubling in the local check). Commands at or below 1024 behave as the base.
+- `0101`: with the single-queue semaphore style the encoded wait is a no-op, so ordering relies on command buffers completing in queue order. That was observed (0 of 40 samples out of order), but no Metal document found guarantees it.
+- `0102`: the tess control output stride is not compared with the tess evaluation input size, unlike the vertex to tess control pair, because the render pipeline compiler requests no reflection. They should match, as the evaluation stage is converted from the control stage's outputs; this is unverified.
 - `0106`: a compute shader whose output later feeds vertex positions also loses `NoContraction`; the stage cannot show this.
 - `0103`: Metal does not state whether `memoryBarrierWithScope:` covers indirect argument reads, so the patch assumes it does not and ends the encoder before such a `vkCmdDispatchIndirect`.
