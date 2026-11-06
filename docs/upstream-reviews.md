@@ -20,7 +20,7 @@ Observed on an Apple M3 Max with macOS 27.0.1, under Wine and Rosetta 2 on Apple
 | The nivogli fork, without the present fix | About 35 FPS at High; repeated older frames and row tearing |
 | The fork plus the present fix | Those frames and tearing gone, by visual confirmation; no frame rate was measured for this build |
 
-The fork's benefit was measured as a whole, not per commit. **The series below differs from those builds and has not yet been run with the game.**
+The fork's benefit was measured as a whole, not per commit. The series below differs from those builds. It has since been run with the game on the same machine: at the High preset it entered the world and played about five minutes, with no draw cap raise and no device loss in the logs; the maintainer saw frame rate fall late in that session, and no frame rate figure was recorded for this series. Tessellated draws in that run were not confirmed, and other Vulkan titles have not been tested with it.
 
 Small local checks of this series (a program that creates `VkInstance` and `VkDevice`, draws offscreen and runs compute on the same machine, not committed):
 
