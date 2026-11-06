@@ -1,0 +1,157 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: nivogli <224451320+nivogli@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 17:00:02 +0900
+Subject: [PATCH] Keep compute-sourced barriers inside the compute encoder
+
+With Metal argument buffers and a residency set, every vkCmdPipelineBarrier
+ends the Metal encoder and makes the next one wait on fences. A workload
+with many small dispatches and compute barriers then spends much of its
+GPU time switching encoders. A barrier whose source is compute only can
+instead write a memory barrier into the open vkCmdDispatch encoder and
+defer the fence bookkeeping until that encoder ends: consumers in this
+encoder are ordered by the memory barrier, consumers in later render or
+blit encoders wait for the fence that encoder updates.
+
+Adopted from https://github.com/nivogli/MoltenVK commits
+49a7b097605e083a43faf863878b833be1bae3c2 and
+2babf4277c9f11d03b348b14a389adeefc71cd12, reported at
+https://github.com/KhronosGroup/MoltenVK/issues/2893.
+
+Modifications: the two commits are merged, with one switch instead of
+two and no log output. The condition on the base's fence path is now
+one predicate, encodesExplicitBarriers(), shared with the concurrent
+dispatch patch. A barrier is only kept when the open encoder last ran
+vkCmdDispatch work and the device reports memory barriers.
+
+Metal does not state that memoryBarrierWithScope: covers the argument
+read of dispatchThreadgroupsWithIndirectBuffer:. A kept barrier whose
+destination includes DRAW_INDIRECT or ALL_COMMANDS therefore makes the
+next vkCmdDispatchIndirect end the encoder first, so it waits on the
+fence. Later indirect draws are in other encoders and already wait.
+
+MVK_PERF_KEEP_COMPUTE_ENCODER=0 restores the fence path for every barrier.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ MoltenVK/MoltenVK/Commands/MVKCmdDispatch.mm  |  1 +
+ MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm  | 17 ++++++++++++-
+ MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h | 23 ++++++++++++++++++
+ .../MoltenVK/Commands/MVKCommandBuffer.mm     | 24 +++++++++++++++++++
+ 4 files changed, 64 insertions(+), 1 deletion(-)
+
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDispatch.mm b/MoltenVK/MoltenVK/Commands/MVKCmdDispatch.mm
+index 2a7eff45..5992362e 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdDispatch.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdDispatch.mm
+@@ -69,6 +69,7 @@
+ }
+ 
+ void MVKCmdDispatchIndirect::encode(MVKCommandEncoder* cmdEncoder) {
++	cmdEncoder->endComputeEncoderForIndirectArgs();	// Downstream change: see MVKCommandEncoder
+     cmdEncoder->finalizeDispatchState();	// Ensure all updated state has been submitted to Metal
+     [cmdEncoder->getMTLComputeEncoder(kMVKCommandUseDispatch) dispatchThreadgroupsWithIndirectBuffer: _mtlIndirectBuffer
+ 																				indirectBufferOffset: _mtlIndirectBufferOffset
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm b/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm
+index 3e9fc79f..a2091cef 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm
+@@ -160,7 +160,22 @@
+ 	}
+ #endif
+ 
+-	if (!cmdEncoder->_mtlRenderEncoder && cmdEncoder->isUsingMetalArgumentBuffers() && cmdEncoder->getDevice()->hasResidencySet()) {
++	// Downstream change (not in upstream MoltenVK): a barrier whose source is compute only and that needs no host
++	// sync stays inside the open compute encoder. Anything else keeps the fence path.
++	bool keptInComputeEncoder = false;
++	if (!cmdEncoder->_mtlRenderEncoder && cmdEncoder->encodesExplicitBarriers()) {
++		uint64_t srcStages = 0, dstStages = 0;
++		bool touchesHost = false, coversIndirectArgs = false;
++		for (auto& b : _barriers) {
++			srcStages |= mvkBarrierStagesFromPipelineStageFlags(b.srcStageMask);
++			dstStages |= mvkBarrierStagesFromPipelineStageFlags(b.dstStageMask);
++			touchesHost |= mvkIsAnyFlagEnabled(b.srcStageMask | b.dstStageMask, VK_PIPELINE_STAGE_HOST_BIT);
++			coversIndirectArgs |= mvkIsAnyFlagEnabled(b.dstStageMask, VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
++		}
++		keptInComputeEncoder = !_barriers.empty() && !touchesHost && cmdEncoder->tryKeepBarrierInComputeEncoder(srcStages, dstStages, coversIndirectArgs);
++	}
++
++	if (!keptInComputeEncoder && !cmdEncoder->_mtlRenderEncoder && cmdEncoder->encodesExplicitBarriers()) {
+ 		cmdEncoder->endCurrentMetalEncoding();
+ 
+ 		for (auto& b : _barriers) {
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h
+index f6c94625..56fde609 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h
+@@ -455,6 +455,26 @@ public:
+ 	/** Insert a new execution barrier */
+ 	void setBarrier(uint64_t sourceStageMask, uint64_t destStageMask);
+ 
++	/**
++	 * Downstream change (not in upstream MoltenVK): whether pipeline barriers end the compute encoder or write a
++	 * memory barrier inside it, instead of relying on Metal's hazard tracking between serial dispatches.
++	 */
++	bool encodesExplicitBarriers() { return isUsingMetalArgumentBuffers() && getDevice()->hasResidencySet(); }
++
++	/**
++	 * Downstream change (not in upstream MoltenVK): handles a barrier whose source is compute only with a memory
++	 * barrier inside the open vkCmdDispatch encoder, without ending it. The fence bookkeeping (setBarrier) is deferred
++	 * until that encoder ends, so later encoders still wait for all its work. Returns false if the barrier must take
++	 * the fence path. MVK_PERF_KEEP_COMPUTE_ENCODER=0 disables this.
++	 */
++	bool tryKeepBarrierInComputeEncoder(uint64_t sourceStageMask, uint64_t destStageMask, bool coversIndirectArgs);
++
++	/**
++	 * Ends the compute encoder if a barrier kept in it covers indirect argument reads, before vkCmdDispatchIndirect
++	 * reads its arguments. Metal does not state that memoryBarrierWithScope: covers them.
++	 */
++	void endComputeEncoderForIndirectArgs() { if (_keptBarrierCoversIndirectArgs) { endCurrentMetalEncoding(); } }
++
+ 	/** Encode waits for a specific stage in given encoder. */
+ 	void barrierWait(MVKBarrierStage stage, id<MTLRenderCommandEncoder> mtlEncoder, MTLRenderStages beforeStages);
+ 	void barrierWait(MVKBarrierStage stage, id<MTLBlitCommandEncoder> mtlEncoder);
+@@ -550,6 +570,9 @@ protected:
+ 	uint32_t _renderSubpassIndex;
+ 	uint32_t _multiviewPassIndex;
+     uint32_t _flushCount;
++	uint64_t _deferredBarrierSrc = 0;				// Downstream change: see tryKeepBarrierInComputeEncoder()
++	uint64_t _deferredBarrierDst = 0;
++	bool _keptBarrierCoversIndirectArgs = false;
+ 	MVKCommandUse _mtlComputeEncoderUse;
+ 	uint32_t _mtlComputeEncoderStages;
+ 	MVKCommandUse _mtlBlitEncoderUse;
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
+index de39c961..a78ac829 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
+@@ -1075,6 +1075,30 @@ static MVKBarrierStage commandUseToBarrierStage(MVKCommandUse use) {
+     _mtlBlitEncoderUse = kMVKCommandUseNone;
+ 
+ 	encodeTimestampStageCounterSamples();
++
++	// Downstream change (not in upstream MoltenVK): barriers kept inside the compute encoder that just
++	// ended take effect for later encoders, as if the encoder had ended at the last of them.
++	if (_deferredBarrierSrc) {
++		setBarrier(_deferredBarrierSrc, _deferredBarrierDst);
++		_deferredBarrierSrc = _deferredBarrierDst = 0;
++	}
++	_keptBarrierCoversIndirectArgs = false;
++}
++
++bool MVKCommandEncoder::tryKeepBarrierInComputeEncoder(uint64_t sourceStageMask, uint64_t destStageMask, bool coversIndirectArgs) {
++	static const bool enabled = mvkGetEnvVarNumber("MVK_PERF_KEEP_COMPUTE_ENCODER", 1) != 0;
++	if ( !enabled || !getMetalFeatures().memoryBarriers ) { return false; }
++
++	// The source must be compute work in this encoder. Consumers in later render or blit encoders wait for the fence
++	// this encoder updates when it ends; consumers in this encoder are ordered by the memory barrier.
++	if ( !_mtlComputeEncoder || _mtlComputeEncoderUse != kMVKCommandUseDispatch || _mtlBlitEncoder ||
++		sourceStageMask != (1ull << kMVKBarrierStageCompute) ) { return false; }
++
++	[_mtlComputeEncoder memoryBarrierWithScope: MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
++	_deferredBarrierSrc |= sourceStageMask;
++	_deferredBarrierDst |= destStageMask;
++	_keptBarrierCoversIndirectArgs |= coversIndirectArgs;
++	return true;
+ }
+ 
+ static MTLDispatchType getDispatchType(MVKCommandUse use) {

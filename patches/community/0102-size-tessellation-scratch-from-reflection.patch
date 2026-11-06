@@ -1,0 +1,434 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: nivogli <224451320+nivogli@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 17:00:02 +0900
+Subject: [PATCH] Size tessellation scratch buffers from reflected shader
+ output sizes
+
+Tessellated draws allocate vertex, control-point and patch output buffers
+using the device maximum component counts, for an indirect draw 1,048,576
+vertices times 496 bytes. Read the sizes the shaders really write from
+Metal pipeline reflection, so most of that memory is not allocated at all.
+An unknown or implausible size keeps the previous default.
+
+An indirect draw larger than the vertex budget used to write past these
+buffers. The conversion kernels now clamp such a draw to the budget.
+
+Adopted from https://github.com/nivogli/MoltenVK commits
+a6289be3e28ddbf7f9d87bd09f65946edebc6df7 (sizing, same idea as
+https://github.com/KhronosGroup/MoltenVK/pull/2892) and the clamp of
+bb88c75c7b28a235d1a7c519b0fda3acf60bb370.
+
+Modifications: statistics, the completion handler and the log output of
+those commits are dropped. MVK_PERF_TESS_INDIRECT_VERTS is removed: the
+triangle-fan index buffers use the same constant, so a budget above
+kMVKMaxDrawIndirectVertexCount could overflow them. The clamp now takes
+that constant. Buffer lengths are computed in NSUInteger, so a large
+reflected stride cannot wrap in 32 bits.
+
+MVK_PERF_TESS_REFLECTED_SIZES=0 restores the previous buffer sizes. The
+clamp has no switch: it acts only where the base writes out of bounds.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm      | 26 +++----
+ ...KCommandPipelineStateFactoryShaderSource.h | 39 ++++++++---
+ MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h    | 34 +++++++++-
+ MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm   | 67 +++++++++++++++++--
+ 4 files changed, 135 insertions(+), 31 deletions(-)
+
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
+index d0452973..0c47728c 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
+@@ -223,7 +223,7 @@
+             case kMVKGraphicsStageVertex: {
+                 mtlTessCtlEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
+                 if (pipeline->needsVertexOutputBuffer()) {
+-                    vtxOutBuff = cmdEncoder->getTempMTLBuffer(_vertexCount * _instanceCount * 4 * dvcLimits.maxVertexOutputComponents, true);
++                    vtxOutBuff = cmdEncoder->getTempMTLBuffer((NSUInteger)_vertexCount * _instanceCount * pipeline->getTessVertexOutputStride(4 * dvcLimits.maxVertexOutputComponents), true);
+                     [mtlTessCtlEncoder setBuffer: vtxOutBuff->_mtlBuffer
+                                           offset: vtxOutBuff->_offset
+                                          atIndex: pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::Output]];
+@@ -250,13 +250,13 @@
+             case kMVKGraphicsStageTessControl: {
+                 mtlTessCtlEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
+                 if (pipeline->needsTessCtlOutputBuffer()) {
+-                    tcOutBuff = cmdEncoder->getTempMTLBuffer(outControlPointCount * tessParams.patchCount * 4 * dvcLimits.maxTessellationControlPerVertexOutputComponents, true);
++                    tcOutBuff = cmdEncoder->getTempMTLBuffer((NSUInteger)outControlPointCount * tessParams.patchCount * pipeline->getTessCtlOutputStride(4 * dvcLimits.maxTessellationControlPerVertexOutputComponents), true);
+                     [mtlTessCtlEncoder setBuffer: tcOutBuff->_mtlBuffer
+                                           offset: tcOutBuff->_offset
+                                          atIndex: pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids[MVKImplicitBuffer::Output]];
+                 }
+                 if (pipeline->needsTessCtlPatchOutputBuffer()) {
+-                    tcPatchOutBuff = cmdEncoder->getTempMTLBuffer(tessParams.patchCount * 4 * dvcLimits.maxTessellationControlPerPatchOutputComponents, true);
++                    tcPatchOutBuff = cmdEncoder->getTempMTLBuffer((NSUInteger)tessParams.patchCount * pipeline->getTessCtlPatchOutputStride(4 * dvcLimits.maxTessellationControlPerPatchOutputComponents), true);
+                     [mtlTessCtlEncoder setBuffer: tcPatchOutBuff->_mtlBuffer
+                                           offset: tcPatchOutBuff->_offset
+                                          atIndex: pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids[MVKImplicitBuffer::PatchOutput]];
+@@ -506,7 +506,7 @@
+             case kMVKGraphicsStageVertex: {
+                 mtlTessCtlEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
+                 if (pipeline->needsVertexOutputBuffer()) {
+-                    vtxOutBuff = cmdEncoder->getTempMTLBuffer(_indexCount * _instanceCount * 4 * dvcLimits.maxVertexOutputComponents, true);
++                    vtxOutBuff = cmdEncoder->getTempMTLBuffer((NSUInteger)_indexCount * _instanceCount * pipeline->getTessVertexOutputStride(4 * dvcLimits.maxVertexOutputComponents), true);
+                     [mtlTessCtlEncoder setBuffer: vtxOutBuff->_mtlBuffer
+                                           offset: vtxOutBuff->_offset
+                                          atIndex: pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::Output]];
+@@ -536,13 +536,13 @@
+             case kMVKGraphicsStageTessControl: {
+                 mtlTessCtlEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
+                 if (pipeline->needsTessCtlOutputBuffer()) {
+-                    tcOutBuff = cmdEncoder->getTempMTLBuffer(outControlPointCount * tessParams.patchCount * 4 * dvcLimits.maxTessellationControlPerVertexOutputComponents, true);
++                    tcOutBuff = cmdEncoder->getTempMTLBuffer((NSUInteger)outControlPointCount * tessParams.patchCount * pipeline->getTessCtlOutputStride(4 * dvcLimits.maxTessellationControlPerVertexOutputComponents), true);
+                     [mtlTessCtlEncoder setBuffer: tcOutBuff->_mtlBuffer
+                                           offset: tcOutBuff->_offset
+                                          atIndex: pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids[MVKImplicitBuffer::Output]];
+                 }
+                 if (pipeline->needsTessCtlPatchOutputBuffer()) {
+-                    tcPatchOutBuff = cmdEncoder->getTempMTLBuffer(tessParams.patchCount * 4 * dvcLimits.maxTessellationControlPerPatchOutputComponents, true);
++                    tcPatchOutBuff = cmdEncoder->getTempMTLBuffer((NSUInteger)tessParams.patchCount * pipeline->getTessCtlPatchOutputStride(4 * dvcLimits.maxTessellationControlPerPatchOutputComponents), true);
+                     [mtlTessCtlEncoder setBuffer: tcPatchOutBuff->_mtlBuffer
+                                           offset: tcPatchOutBuff->_offset
+                                          atIndex: pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids[MVKImplicitBuffer::PatchOutput]];
+@@ -945,13 +945,13 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 		tcParamsBuff = cmdEncoder->getTempMTLBuffer(paramsSize, true);
+         mtlParmBuffOfst = tcParamsBuff->_offset;
+         if (pipeline->needsVertexOutputBuffer()) {
+-            vtxOutBuff = cmdEncoder->getTempMTLBuffer(vertexCount * 4 * dvcLimits.maxVertexOutputComponents, true);
++            vtxOutBuff = cmdEncoder->getTempMTLBuffer((NSUInteger)vertexCount * pipeline->getTessVertexOutputStride(4 * dvcLimits.maxVertexOutputComponents), true);
+         }
+         if (pipeline->needsTessCtlOutputBuffer()) {
+-            tcOutBuff = cmdEncoder->getTempMTLBuffer(outControlPointCount * patchCount * 4 * dvcLimits.maxTessellationControlPerVertexOutputComponents, true);
++            tcOutBuff = cmdEncoder->getTempMTLBuffer((NSUInteger)outControlPointCount * patchCount * pipeline->getTessCtlOutputStride(4 * dvcLimits.maxTessellationControlPerVertexOutputComponents), true);
+         }
+         if (pipeline->needsTessCtlPatchOutputBuffer()) {
+-            tcPatchOutBuff = cmdEncoder->getTempMTLBuffer(patchCount * 4 * dvcLimits.maxTessellationControlPerPatchOutputComponents, true);
++            tcPatchOutBuff = cmdEncoder->getTempMTLBuffer((NSUInteger)patchCount * pipeline->getTessCtlPatchOutputStride(4 * dvcLimits.maxTessellationControlPerPatchOutputComponents), true);
+         }
+         tcLevelBuff = cmdEncoder->getTempMTLBuffer(patchCount * sizeof(MTLQuadTessellationFactorsHalf), true);
+ 
+@@ -1004,6 +1004,7 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 				state.bindStructBytes(mtlTessCtlEncoder, &_drawCount,               6);
+ 				state.bindStructBytes(mtlTessCtlEncoder, &vtxThreadExecWidth,       7);
+ 				state.bindStructBytes(mtlTessCtlEncoder, &tcWorkgroupSize,          8);
++				state.bindStructBytes(mtlTessCtlEncoder, &vertexCount,              9);	// Downstream change: clamp bound for the kernel
+ 				if (mtlFeats.nonUniformThreadgroups) {
+ 					[mtlTessCtlEncoder dispatchThreads: MTLSizeMake(_drawCount, 1, 1)
+ 								 threadsPerThreadgroup: MTLSizeMake(mtlConvertState.threadExecutionWidth, 1, 1)];
+@@ -1311,13 +1312,13 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+         tcParamsBuff = cmdEncoder->getTempMTLBuffer(paramsSize, true);
+         mtlParmBuffOfst = tcParamsBuff->_offset;
+         if (pipeline->needsVertexOutputBuffer()) {
+-            vtxOutBuff = cmdEncoder->getTempMTLBuffer(vertexCount * 4 * dvcLimits.maxVertexOutputComponents, true);
++            vtxOutBuff = cmdEncoder->getTempMTLBuffer((NSUInteger)vertexCount * pipeline->getTessVertexOutputStride(4 * dvcLimits.maxVertexOutputComponents), true);
+         }
+         if (pipeline->needsTessCtlOutputBuffer()) {
+-            tcOutBuff = cmdEncoder->getTempMTLBuffer(outControlPointCount * patchCount * 4 * dvcLimits.maxTessellationControlPerVertexOutputComponents, true);
++            tcOutBuff = cmdEncoder->getTempMTLBuffer((NSUInteger)outControlPointCount * patchCount * pipeline->getTessCtlOutputStride(4 * dvcLimits.maxTessellationControlPerVertexOutputComponents), true);
+         }
+         if (pipeline->needsTessCtlPatchOutputBuffer()) {
+-            tcPatchOutBuff = cmdEncoder->getTempMTLBuffer(patchCount * 4 * dvcLimits.maxTessellationControlPerPatchOutputComponents, true);
++            tcPatchOutBuff = cmdEncoder->getTempMTLBuffer((NSUInteger)patchCount * pipeline->getTessCtlPatchOutputStride(4 * dvcLimits.maxTessellationControlPerPatchOutputComponents), true);
+         }
+         tcLevelBuff = cmdEncoder->getTempMTLBuffer(patchCount * sizeof(MTLQuadTessellationFactorsHalf), true);
+         vtxIndexBuff = cmdEncoder->getTempMTLBuffer(ibb.size, true);
+@@ -1380,6 +1381,7 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+                     state.bindStructBytes(mtlTessCtlEncoder, &_drawCount,               6);
+                     state.bindStructBytes(mtlTessCtlEncoder, &vtxThreadExecWidth,       7);
+                     state.bindStructBytes(mtlTessCtlEncoder, &tcWorkgroupSize,          8);
++                    state.bindStructBytes(mtlTessCtlEncoder, &vertexCount,              9);	// Downstream change: clamp bound for the kernel
+                     [mtlTessCtlEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(_drawCount, mtlConvertState.threadExecutionWidth), 1, 1)
+                                       threadsPerThreadgroup: MTLSizeMake(mtlConvertState.threadExecutionWidth, 1, 1)];
+                 }
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandPipelineStateFactoryShaderSource.h b/MoltenVK/MoltenVK/Commands/MVKCommandPipelineStateFactoryShaderSource.h
+index 9a72cc2a..60452409 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandPipelineStateFactoryShaderSource.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandPipelineStateFactoryShaderSource.h
+@@ -377,6 +377,19 @@ kernel void cmdDrawIndirectCopyZeroDivisorVertexBuffers(const device char* indir
+ 	destBuff[idx] = srcBuff[(size_t)baseInstance * vertexStride + byteIdx];
+ }
+ 
++// Downstream change (not in upstream MoltenVK): clamp a tessellated indirect draw to the
++// vertex count that the scratch buffers are sized for, instead of writing past them.
++static void clampTessDraw(thread uint32_t& vertexCount, thread uint32_t& instanceCount,
++                          uint32_t inControlPointCount, uint32_t maxVertexCount) {
++	if ((ulong)vertexCount * instanceCount <= maxVertexCount) { return; }
++	if (vertexCount > maxVertexCount) {
++		vertexCount = maxVertexCount / inControlPointCount * inControlPointCount;	// whole patches only
++		instanceCount = min(instanceCount, 1u);
++	} else {
++		instanceCount = maxVertexCount / vertexCount;
++	}
++}
++
+ kernel void cmdDrawIndirectTessConvertBuffers(const device char* srcBuff [[buffer(0)]],
+                                               device char* destBuff [[buffer(1)]],
+                                               device char* paramsBuff [[buffer(2)]],
+@@ -386,6 +399,7 @@ kernel void cmdDrawIndirectTessConvertBuffers(const device char* srcBuff [[buffe
+                                               constant uint32_t& drawCount [[buffer(6)]],
+                                               constant uint32_t& vtxThreadExecWidth [[buffer(7)]],
+                                               constant uint32_t& tcWorkgroupSize [[buffer(8)]],
++                                              constant uint32_t& maxVertexCount [[buffer(9)]],
+                                               uint idx [[thread_position_in_grid]]) {
+ 	if (idx >= drawCount) { return; }
+ 	const device auto& src = *reinterpret_cast<const device MTLDrawPrimitivesIndirectArguments*>(srcBuff + idx * srcStride);
+@@ -397,11 +411,13 @@ kernel void cmdDrawIndirectTessConvertBuffers(const device char* srcBuff [[buffe
+ 	device auto& destVtx = *(device MTLDispatchThreadgroupsIndirectArguments*)dest;
+ 	device auto& destTC = *(device MTLDispatchThreadgroupsIndirectArguments*)(dest + sizeof(MTLDispatchThreadgroupsIndirectArguments));
+ 	device auto& destTE = *(device MTLDrawPatchIndirectArguments*)(dest + sizeof(MTLDispatchThreadgroupsIndirectArguments) * 2);
+-	uint32_t patchCount = (src.vertexCount * src.instanceCount + inControlPointCount - 1) / inControlPointCount;
++	uint32_t vertexCount = src.vertexCount, instanceCount = src.instanceCount;
++	clampTessDraw(vertexCount, instanceCount, inControlPointCount, maxVertexCount);
++	uint32_t patchCount = (vertexCount * instanceCount + inControlPointCount - 1) / inControlPointCount;
+ 	params[0] = inControlPointCount;
+ 	params[1] = patchCount;
+-	destVtx.threadgroupsPerGrid[0] = (src.vertexCount + vtxThreadExecWidth - 1) / vtxThreadExecWidth;
+-	destVtx.threadgroupsPerGrid[1] = src.instanceCount;
++	destVtx.threadgroupsPerGrid[0] = (vertexCount + vtxThreadExecWidth - 1) / vtxThreadExecWidth;
++	destVtx.threadgroupsPerGrid[1] = instanceCount;
+ 	destVtx.threadgroupsPerGrid[2] = 1;
+ 	destTC.threadgroupsPerGrid[0] = (patchCount * outControlPointCount + tcWorkgroupSize - 1) / tcWorkgroupSize;
+ 	destTC.threadgroupsPerGrid[1] = destTC.threadgroupsPerGrid[2] = 1;
+@@ -411,8 +427,8 @@ kernel void cmdDrawIndirectTessConvertBuffers(const device char* srcBuff [[buffe
+ 	destSI.stageInOrigin[0] = src.vertexStart;
+ 	destSI.stageInOrigin[1] = src.baseInstance;
+ 	destSI.stageInOrigin[2] = 0;
+-	destSI.stageInSize[0] = src.vertexCount;
+-	destSI.stageInSize[1] = src.instanceCount;
++	destSI.stageInSize[0] = vertexCount;
++	destSI.stageInSize[1] = instanceCount;
+ 	destSI.stageInSize[2] = 1;
+ }
+ 
+@@ -425,6 +441,7 @@ kernel void cmdDrawIndexedIndirectTessConvertBuffers(const device char* srcBuff
+                                                      constant uint32_t& drawCount [[buffer(6)]],
+                                                      constant uint32_t& vtxThreadExecWidth [[buffer(7)]],
+                                                      constant uint32_t& tcWorkgroupSize [[buffer(8)]],
++                                                     constant uint32_t& maxVertexCount [[buffer(9)]],
+                                                      uint idx [[thread_position_in_grid]]) {
+ 	if (idx >= drawCount) { return; }
+ 	const device auto& src = *reinterpret_cast<const device MTLDrawIndexedPrimitivesIndirectArguments*>(srcBuff + idx * srcStride);
+@@ -436,11 +453,13 @@ kernel void cmdDrawIndexedIndirectTessConvertBuffers(const device char* srcBuff
+ 	device auto& destVtx = *(device MTLDispatchThreadgroupsIndirectArguments*)dest;
+ 	device auto& destTC = *(device MTLDispatchThreadgroupsIndirectArguments*)(dest + sizeof(MTLDispatchThreadgroupsIndirectArguments));
+ 	device auto& destTE = *(device MTLDrawPatchIndirectArguments*)(dest + sizeof(MTLDispatchThreadgroupsIndirectArguments) * 2);
+-	uint32_t patchCount = (src.indexCount * src.instanceCount + inControlPointCount - 1) / inControlPointCount;
++	uint32_t indexCount = src.indexCount, instanceCount = src.instanceCount;
++	clampTessDraw(indexCount, instanceCount, inControlPointCount, maxVertexCount);
++	uint32_t patchCount = (indexCount * instanceCount + inControlPointCount - 1) / inControlPointCount;
+ 	params[0] = inControlPointCount;
+ 	params[1] = patchCount;
+-	destVtx.threadgroupsPerGrid[0] = (src.indexCount + vtxThreadExecWidth - 1) / vtxThreadExecWidth;
+-	destVtx.threadgroupsPerGrid[1] = src.instanceCount;
++	destVtx.threadgroupsPerGrid[0] = (indexCount + vtxThreadExecWidth - 1) / vtxThreadExecWidth;
++	destVtx.threadgroupsPerGrid[1] = instanceCount;
+ 	destVtx.threadgroupsPerGrid[2] = 1;
+ 	destTC.threadgroupsPerGrid[0] = (patchCount * outControlPointCount + tcWorkgroupSize - 1) / tcWorkgroupSize;
+ 	destTC.threadgroupsPerGrid[1] = destTC.threadgroupsPerGrid[2] = 1;
+@@ -450,8 +469,8 @@ kernel void cmdDrawIndexedIndirectTessConvertBuffers(const device char* srcBuff
+ 	destSI.stageInOrigin[0] = src.baseVertex;
+ 	destSI.stageInOrigin[1] = src.baseInstance;
+ 	destSI.stageInOrigin[2] = 0;
+-	destSI.stageInSize[0] = src.indexCount;
+-	destSI.stageInSize[1] = src.instanceCount;
++	destSI.stageInSize[0] = indexCount;
++	destSI.stageInSize[1] = instanceCount;
+ 	destSI.stageInSize[2] = 1;
+ }
+ 
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
+index e385e9bd..12f20988 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
+@@ -285,6 +285,18 @@ public:
+ 	/** Returns true if the tessellation control shader needs a buffer to store its per-patch output. */
+ 	bool needsTessCtlPatchOutputBuffer() const { return _stageResources[kMVKShaderStageTessCtl].implicitBuffers.needed.has(MVKImplicitBuffer::PatchOutput); }
+ 
++	/**
++	 * Downstream change (not in upstream MoltenVK): bytes per vertex in the vertex stage's output buffer of a tessellated draw.
++	 * The shaders' own size from Metal pipeline reflection if known, else defaultStride (4 x the device maximum components).
++	 */
++	uint32_t getTessVertexOutputStride(uint32_t defaultStride) const { return _tessVtxOutStride ? _tessVtxOutStride : defaultStride; }
++
++	/** As getTessVertexOutputStride(), for the tessellation control stage's per-vertex output. */
++	uint32_t getTessCtlOutputStride(uint32_t defaultStride) const { return _tessCtlOutStride ? _tessCtlOutStride : defaultStride; }
++
++	/** As getTessVertexOutputStride(), for the tessellation control stage's per-patch output. */
++	uint32_t getTessCtlPatchOutputStride(uint32_t defaultStride) const { return _tessCtlPatchOutStride ? _tessCtlPatchOutStride : defaultStride; }
++
+ 	/** Returns the Vulkan primitive topology. */
+ 	VkPrimitiveTopology getVkPrimitiveTopology() { return _vkPrimitiveTopology; }
+ 
+@@ -334,9 +346,11 @@ protected:
+ 	typedef MVKSmallVector<mvk::SPIRVShaderInterfaceVariable, 32> SPIRVShaderInputs;
+ 
+     id<MTLRenderPipelineState> getOrCompilePipeline(MTLRenderPipelineDescriptor* plDesc, id<MTLRenderPipelineState>& plState);
+-    id<MTLComputePipelineState> getOrCompilePipeline(MTLComputePipelineDescriptor* plDesc, id<MTLComputePipelineState>& plState, const char* compilerType);
++    id<MTLComputePipelineState> getOrCompilePipeline(MTLComputePipelineDescriptor* plDesc, id<MTLComputePipelineState>& plState, const char* compilerType,
++													 std::initializer_list<NSUInteger> reflectBufferIndexes = {}, NSUInteger* pReflectedSizes = nullptr);
+ 	bool compileTessVertexStageState(MTLComputePipelineDescriptor* vtxPLDesc, MVKMTLFunction* pVtxFunctions, VkPipelineCreationFeedback* pVertexFB);
+ 	bool compileTessControlStageState(MTLComputePipelineDescriptor* tcPLDesc, VkPipelineCreationFeedback* pTessCtlFB);
++	void initTessOutputStrides(NSUInteger tcInSize, NSUInteger tcOutSize, NSUInteger tcPatchOutSize);
+ 	void initDynamicState(const VkGraphicsPipelineCreateInfo* pCreateInfo);
+ 	void initSampleLocations(const VkGraphicsPipelineCreateInfo* pCreateInfo);
+     void initMTLRenderPipelineState(const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData, VkPipelineCreationFeedback* pPipelineFB, const VkPipelineShaderStageCreateInfo* pVertexSS, VkPipelineCreationFeedback* pVertexFB, const VkPipelineShaderStageCreateInfo* pTessCtlSS, VkPipelineCreationFeedback* pTessCtlFB, const VkPipelineShaderStageCreateInfo* pTessEvalSS, VkPipelineCreationFeedback* pTessEvalFB, const VkPipelineShaderStageCreateInfo* pFragmentSS, VkPipelineCreationFeedback* pFragmentFB);
+@@ -393,6 +407,10 @@ protected:
+ 	id<MTLComputePipelineState> _mtlTessVertexStageIndex32State = nil;
+ 	id<MTLComputePipelineState> _mtlTessControlStageState = nil;
+ 	id<MTLRenderPipelineState> _mtlPipelineState = nil;
++	uint32_t _tessVtxOutStride = 0;			// Downstream change: 0 = unknown, use the device maximum
++	uint32_t _tessCtlOutStride = 0;
++	uint32_t _tessCtlPatchOutStride = 0;
++	NSUInteger _tessVtxOutReflected = 0;	// Vertex stage output struct size, until the tess control stage is compiled
+ 
+ 	MVKShaderImplicitRezBinding _reservedVertexAttributeBufferCount;
+ 	VkPrimitiveTopology _vkPrimitiveTopology;
+@@ -584,6 +602,15 @@ public:
+ 	 */
+ 	id<MTLComputePipelineState> newMTLComputePipelineState(MTLComputePipelineDescriptor* plDesc);
+ 
++	/**
++	 * Downstream change (not in upstream MoltenVK): before compiling, names up to 4 buffer indexes whose data size
++	 * (size of the pointed-to type) is read from Metal's pipeline reflection.
++	 */
++	void setReflectedBufferIndexes(std::initializer_list<NSUInteger> indexes);
++
++	/** The reflected data size of the i-th buffer index, or 0 if unknown. */
++	NSUInteger getReflectedBufferDataSize(uint32_t i) const { return i < _reflectCount ? _reflectedSizes[i] : 0; }
++
+ 
+ #pragma mark Construction
+ 
+@@ -595,9 +622,12 @@ public:
+ 	~MVKComputePipelineCompiler() override;
+ 
+ protected:
+-	bool compileComplete(id<MTLComputePipelineState> pipelineState, NSError *error);
++	bool compileComplete(id<MTLComputePipelineState> pipelineState, NSError *error, MTLComputePipelineReflection* reflection = nil);
+ 
+ 	id<MTLComputePipelineState> _mtlComputePipelineState = nil;
++	NSUInteger _reflectIndexes[4] = {};
++	NSUInteger _reflectedSizes[4] = {};
++	uint32_t _reflectCount = 0;
+ };
+ 
+ 
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+index 47bbd4fc..334eff18 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -516,7 +516,9 @@ static void populateResourceUsage(MVKPipelineStageResourceInfo& dst, SPIRVToMSLC
+ 		startTime = mvkGetTimestamp();
+ 	}
+ 	vtxPLDesc.computeFunction = pVtxFunctions[0].getMTLFunction();
+-    bool res = !!getOrCompilePipeline(vtxPLDesc, _mtlTessVertexStageState, vtxCompilerType);
++	// Downstream change: also read the size of the vertex output struct from Metal's reflection (same in all three variants).
++	NSUInteger vtxOutIdx = _stageResources[kMVKShaderStageVertex].implicitBuffers.ids[MVKImplicitBuffer::Output];
++    bool res = !!getOrCompilePipeline(vtxPLDesc, _mtlTessVertexStageState, vtxCompilerType, {vtxOutIdx}, &_tessVtxOutReflected);
+ 
+ 	vtxPLDesc.computeFunction = pVtxFunctions[1].getMTLFunction();
+     vtxPLDesc.stageInputDescriptor.indexType = MTLIndexTypeUInt16;
+@@ -548,7 +550,14 @@ static void populateResourceUsage(MVKPipelineStageResourceInfo& dst, SPIRVToMSLC
+     if (pTessCtlFB) {
+ 		startTime = mvkGetTimestamp();
+ 	}
+-    bool res = !!getOrCompilePipeline(tcPLDesc, _mtlTessControlStageState, "Tessellation control");
++	// Downstream change: read the sizes of the tess control stage's input, per-vertex output and per-patch output structs.
++	const auto& tcImplicit = _stageResources[kMVKShaderStageTessCtl].implicitBuffers.ids;
++	NSUInteger tcIn = getMetalBufferIndexForVertexAttributeBinding(kMVKTessCtlInputBufferBinding);
++	NSUInteger tcOut = tcImplicit[MVKImplicitBuffer::Output];
++	NSUInteger tcPatchOut = tcImplicit[MVKImplicitBuffer::PatchOutput];
++	NSUInteger tcSizes[3] = {};
++    bool res = !!getOrCompilePipeline(tcPLDesc, _mtlTessControlStageState, "Tessellation control", {tcIn, tcOut, tcPatchOut}, tcSizes);
++	initTessOutputStrides(tcSizes[0], tcSizes[1], tcSizes[2]);
+ 	if (pTessCtlFB) {
+ 		if (!res) {
+ 			mvkDisableFlags(pTessCtlFB->flags, VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT);
+@@ -1010,13 +1019,35 @@ static bool usesConstantColor(MVKRenderStateFlags dynamic, const VkPipelineColor
+ 	return plState;
+ }
+ 
++// Downstream change (not in upstream MoltenVK): size the tessellation scratch buffers by what the shaders really
++// write, instead of the device maximum (4 x 124 components). The vertex output buffer must also hold what the tess
++// control stage reads per vertex, so it takes the larger of the two. Sizes are rounded up to 16 bytes. An unknown or
++// implausible size keeps MoltenVK's default for that buffer. MVK_PERF_TESS_REFLECTED_SIZES=0 restores the defaults.
++void MVKGraphicsPipeline::initTessOutputStrides(NSUInteger tcInSize, NSUInteger tcOutSize, NSUInteger tcPatchOutSize) {
++	static const bool enabled = mvkGetEnvVarNumber("MVK_PERF_TESS_REFLECTED_SIZES", 1) != 0;
++	if ( !enabled ) { return; }
++	auto stride = [](NSUInteger size) -> uint32_t {
++		return (size >= 4 && size <= 65536) ? (uint32_t)mvkAlignByteCount(size, 16) : 0;
++	};
++	_tessVtxOutStride = _tessVtxOutReflected ? stride(std::max(_tessVtxOutReflected, tcInSize)) : 0;
++	_tessCtlOutStride = stride(tcOutSize);
++	_tessCtlPatchOutStride = stride(tcPatchOutSize);
++}
++
+ // Either returns an existing pipeline state or compiles a new one.
++// Downstream change: if pReflectedSizes is given, the data sizes of the buffers at reflectBufferIndexes are returned in it (0 = unknown).
+ id<MTLComputePipelineState> MVKGraphicsPipeline::getOrCompilePipeline(MTLComputePipelineDescriptor* plDesc,
+ 																	  id<MTLComputePipelineState>& plState,
+-																	  const char* compilerType) {
++																	  const char* compilerType,
++																	  std::initializer_list<NSUInteger> reflectBufferIndexes,
++																	  NSUInteger* pReflectedSizes) {
+ 	if ( !plState ) {
+ 		MVKComputePipelineCompiler* plc = new MVKComputePipelineCompiler(this, compilerType);
++		if (pReflectedSizes) { plc->setReflectedBufferIndexes(reflectBufferIndexes); }
+ 		plState = plc->newMTLComputePipelineState(plDesc);	// retained
++		if (pReflectedSizes) {
++			for (uint32_t i = 0; i < reflectBufferIndexes.size(); i++) { pReflectedSizes[i] = plc->getReflectedBufferDataSize(i); }
++		}
+ 		plc->destroy();
+ 		if ( !plState ) { _hasValidMTLPipelineStates = false; }
+ 	}
+@@ -3062,13 +3093,17 @@ void serialize(Archive & archive, MVKCompressor<C>& comp) {
+ id<MTLComputePipelineState> MVKComputePipelineCompiler::newMTLComputePipelineState(MTLComputePipelineDescriptor* plDesc) {
+ 	unique_lock<mutex> lock(_completionLock);
+ 
++	MTLPipelineOption options = MTLPipelineOptionNone;
++	if (_reflectCount) {
++		if (@available(macOS 13.0, iOS 16.0, tvOS 16.0, *)) { options = MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo; }
++	}
+ 	compile(lock, ^{
+ 		auto mtlDev = getMTLDevice();
+ 		@synchronized (mtlDev) {
+ 			[mtlDev newComputePipelineStateWithDescriptor: plDesc
+-												  options: MTLPipelineOptionNone
+-										completionHandler: ^(id<MTLComputePipelineState> ps, MTLComputePipelineReflection*, NSError* error) {
+-											bool isLate = compileComplete(ps, error);
++												  options: options
++										completionHandler: ^(id<MTLComputePipelineState> ps, MTLComputePipelineReflection* reflection, NSError* error) {
++											bool isLate = compileComplete(ps, error, reflection);
+ 											if (isLate) { destroy(); }
+ 										}];
+ 		}
+@@ -3077,10 +3112,28 @@ void serialize(Archive & archive, MVKCompressor<C>& comp) {
+ 	return [_mtlComputePipelineState retain];
+ }
+ 
+-bool MVKComputePipelineCompiler::compileComplete(id<MTLComputePipelineState> mtlComputePipelineState, NSError* compileError) {
++void MVKComputePipelineCompiler::setReflectedBufferIndexes(std::initializer_list<NSUInteger> indexes) {
++	_reflectCount = 0;
++	for (NSUInteger idx : indexes) {
++		if (_reflectCount < 4) { _reflectIndexes[_reflectCount++] = idx; }
++	}
++}
++
++bool MVKComputePipelineCompiler::compileComplete(id<MTLComputePipelineState> mtlComputePipelineState, NSError* compileError,
++												 MTLComputePipelineReflection* reflection) {
+ 	lock_guard<mutex> lock(_completionLock);
+ 
+ 	_mtlComputePipelineState = [mtlComputePipelineState retain];		// retained
++	if (reflection && _reflectCount) {
++		if (@available(macOS 13.0, iOS 16.0, tvOS 16.0, *)) {
++			for (id<MTLBinding> binding in reflection.bindings) {
++				if (binding.type != MTLBindingTypeBuffer) { continue; }
++				for (uint32_t i = 0; i < _reflectCount; i++) {
++					if (binding.index == _reflectIndexes[i]) { _reflectedSizes[i] = ((id<MTLBufferBinding>)binding).bufferDataSize; }
++				}
++			}
++		}
++	}
+ 	return endCompile(compileError);
+ }
+ 

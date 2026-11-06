@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: nivogli <224451320+nivogli@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 17:00:02 +0900
+Subject: [PATCH] Run vkCmdDispatch encoders concurrently when barriers are
+ honoured
+
+Vulkan allows dispatches with no barrier between them to overlap, and
+Metal runs them faster in a concurrent encoder. MoltenVK's internal
+compute work keeps serial encoders.
+
+Adopted from https://github.com/nivogli/MoltenVK commit
+9674c5bd733e3e9c6434e18a4569d98ed772b93d, reported at
+https://github.com/KhronosGroup/MoltenVK/issues/2893.
+
+Modifications: that commit made every vkCmdDispatch encoder concurrent.
+Without Metal argument buffers or a residency set, MoltenVK neither ends
+the compute encoder nor writes a memory barrier for a pipeline barrier,
+so ordering relies on the encoder being serial, and a concurrent encoder
+would be a real data race, for example with
+MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0. Concurrency is now only enabled
+under encodesExplicitBarriers(), the predicate the barrier path itself
+uses. The log output is dropped.
+
+MVK_PERF_CONCURRENT_DISPATCH=0 keeps these encoders serial.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
+index a78ac829..82ca5c54 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
+@@ -1101,8 +1101,13 @@ static MVKBarrierStage commandUseToBarrierStage(MVKCommandUse use) {
+ 	return true;
+ }
+ 
+-static MTLDispatchType getDispatchType(MVKCommandUse use) {
++// Downstream change (not in upstream MoltenVK): vkCmdDispatch encoders may run concurrently, because Vulkan lets
++// dispatches with no barrier between them overlap. That is only safe if barriers are honoured inside or between
++// encoders: see encodesExplicitBarriers(). MVK_PERF_CONCURRENT_DISPATCH=0 keeps these encoders serial.
++static MTLDispatchType getDispatchType(MVKCommandUse use, bool concurrentDispatch) {
+ 	switch (use) {
++		case kMVKCommandUseDispatch:
++			return concurrentDispatch ? MTLDispatchTypeConcurrent : MTLDispatchTypeSerial;
+ 		case kMVKCommandUseAccumOcclusionQuery:
+ 			return MTLDispatchTypeConcurrent;
+ 		default:
+@@ -1119,20 +1124,22 @@ static bool wantsSeparateComputeEncoder(MVKCommandUse use) {
+ 	}
+ }
+ 
+-static bool shouldStartNewEncoder(MVKCommandUse prev, MVKCommandUse next) {
++static bool shouldStartNewEncoder(MVKCommandUse prev, MVKCommandUse next, bool concurrentDispatch) {
+ 	if (prev == next)
+ 		return false;
+-	if (getDispatchType(prev) != getDispatchType(next))
++	if (getDispatchType(prev, concurrentDispatch) != getDispatchType(next, concurrentDispatch))
+ 		return true;
+ 	return wantsSeparateComputeEncoder(prev) || wantsSeparateComputeEncoder(next);
+ }
+ 
+ id<MTLComputeCommandEncoder> MVKCommandEncoder::getMTLComputeEncoder(MVKCommandUse cmdUse) {
++	static const bool concurrentDispatchEnabled = mvkGetEnvVarNumber("MVK_PERF_CONCURRENT_DISPATCH", 1) != 0;
++	bool concurrentDispatch = concurrentDispatchEnabled && encodesExplicitBarriers();
+ 	bool needWaits = false;
+-	if (!_mtlComputeEncoder || shouldStartNewEncoder(_mtlComputeEncoderUse, cmdUse)) {
++	if (!_mtlComputeEncoder || shouldStartNewEncoder(_mtlComputeEncoderUse, cmdUse, concurrentDispatch)) {
+ 		needWaits = true;
+ 		endCurrentMetalEncoding();
+-		_mtlComputeEncoder = [_mtlCmdBuffer computeCommandEncoderWithDispatchType:getDispatchType(cmdUse)];
++		_mtlComputeEncoder = [_mtlCmdBuffer computeCommandEncoderWithDispatchType:getDispatchType(cmdUse, concurrentDispatch)];
+ 		retainIfImmediatelyEncoding(_mtlComputeEncoder);
+ 		beginMetalComputeEncoding(cmdUse);
+ 	}

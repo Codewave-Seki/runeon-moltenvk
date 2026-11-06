@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: nivogli <224451320+nivogli@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 17:01:15 +0900
+Subject: [PATCH] Optimize precise-math helpers in fragment and compute shaders
+
+SPIRV-Cross honours SPIR-V NoContraction by routing float add, subtract
+and multiply through helpers marked [[clang::optnone]], so every such
+operation is an unoptimized call. Removing that attribute lets Metal
+optimize them, which matters in compute-heavy shaders.
+
+Adopted from https://github.com/nivogli/MoltenVK commit
+3bf6ffe67e9df4fe4e5ae8e9552e548635f370b0, which takes the change from
+https://github.com/djnunocunhadev/enshrouded-mac-perfmod (Apache-2.0).
+
+Modifications: that commit filtered on the generated text containing
+"\nvertex ", which misses tessellation evaluation entry points
+("[[ patch(...) ]] vertex") and vertex or tessellation control stages
+emitted as "kernel" in a tessellation pipeline, so position-affecting
+stages lost NoContraction. The change now runs in
+MVKShaderModule::convert(), right after conversion, and decides from the
+Vulkan stage in the conversion options: only Fragment and GLCompute are
+changed. Vertex stages emitted for tessellation keep their own stage
+there, so a real compute shader is told apart without further plumbing.
+The helpers are edited as std::string, so the rewritten source is what
+the pipeline cache stores and a shader dump shows.
+
+Known limit: a compute shader whose output later feeds vertex positions
+loses NoContraction too; MoltenVK cannot see that from the stage.
+
+MVK_PERF_OPTIMIZE_PRECISE_MATH=0 disables this for shaders converted
+afterwards. MSL already stored in a pipeline cache stays as stored.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../MoltenVK/GPUObjects/MVKShaderModule.mm    | 20 +++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
+index 3aa44a44..948f535d 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
+@@ -415,6 +415,25 @@ static uint32_t getWorkgroupDimensionSize(const SPIRVWorkgroupSizeDimension& wgD
+ 	return mvkLib ? mvkLib->getMTLFunction(pSpecializationInfo, pShaderFeedback, this) : MVKMTLFunctionNull;
+ }
+ 
++// Downstream change (not in upstream MoltenVK): SPIRV-Cross honours SPIR-V NoContraction ("precise") by routing float
++// add, subtract and multiply through helper functions marked [[clang::optnone]], so every such operation becomes an
++// unoptimized, non-inlined call, which is very slow on Metal in compute-heavy shaders. Let Metal optimize these helpers
++// in fragment and compute stages. Vertex, tessellation and geometry stages keep them: they can feed the position, whose
++// invariance across pipelines NoContraction protects. In a tessellation pipeline those stages may run as kernels, so
++// this decides from the Vulkan stage and not from the generated text. Other optnone helpers (spvMulExtended,
++// spvQuantizeToF16, spvReflect) are left alone. MVK_PERF_OPTIMIZE_PRECISE_MATH=0 disables this.
++static void optimizePreciseMathHelpers(spv::ExecutionModel stage, string& msl) {
++	static const bool enabled = mvkGetEnvVarNumber("MVK_PERF_OPTIMIZE_PRECISE_MATH", 1) != 0;
++	if ( !enabled || (stage != spv::ExecutionModelFragment && stage != spv::ExecutionModelGLCompute) ) { return; }
++
++	const string optnone = "[[clang::optnone]] ";
++	for (const char* helper : {"T spvFAdd(", "T spvFSub(", "T spvFMul(", "vec<T, Cols> spvFMulVectorMatrix(",
++							   "vec<T, Rows> spvFMulMatrixVector(", "matrix<T, RCols, LRows> spvFMulMatrixMatrix("}) {
++		size_t pos = msl.find(optnone + helper);
++		if (pos != string::npos) { msl.erase(pos, optnone.size()); }
++	}
++}
++
+ bool MVKShaderModule::convert(SPIRVToMSLConversionConfiguration* pShaderConfig,
+ 							  SPIRVToMSLConversionResult& conversionResult) {
+ 	const auto& mvkCfg = getMVKConfig();
+@@ -423,6 +442,7 @@ static uint32_t getWorkgroupDimensionSize(const SPIRVWorkgroupSizeDimension& wgD
+ 
+ 	uint64_t startTime = getPerformanceTimestamp();
+ 	bool wasConverted = _spvConverter.convert(*pShaderConfig, conversionResult, shouldLogCode, shouldLogCode, shouldLogEstimatedGLSL);
++	if (wasConverted) { optimizePreciseMathHelpers(pShaderConfig->options.entryPointStage, conversionResult.msl); }
+ 	addPerformanceInterval(getPerformanceStats().shaderCompilation.spirvToMSL, startTime);
+ 
+ 	const char* dumpDir = getMVKConfig().shaderDumpDir;

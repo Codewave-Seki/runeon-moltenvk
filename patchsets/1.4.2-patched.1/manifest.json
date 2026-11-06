@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "patchSetId": "1.4.2-patched.1",
+  "baseId": "moltenvk-main-5189f8de",
+  "resultTree": "1885e5130ddd4543f10f2c3a26503ed767c79308",
+  "patches": [
+    {
+      "order": 1,
+      "path": "patches/community/0101-present-after-present-wait.patch",
+      "sha256": "4f639a999d55f3bd71529e6aeec15cd3013f3f87b89ad361a6d35b2c3e9b8e69",
+      "kind": "community",
+      "author": "Dirk Fortmeier <d.fortmeier@gmail.com>",
+      "sourceUrl": "https://github.com/fortmeier/MoltenVK/pull/1",
+      "sourceCommits": [
+        "a58d6bcf04ac4a8c1f59652b340411dde760b33a"
+      ],
+      "summary": "Present swapchain drawables from the present command buffer completed-handler, after the wait semaphores signal"
+    },
+    {
+      "order": 2,
+      "path": "patches/community/0102-size-tessellation-scratch-from-reflection.patch",
+      "sha256": "2e766bf211d29f011d2e636e6460a25d9a784a90f6e6de862e3f2964cef53630",
+      "kind": "community",
+      "author": "nivogli <224451320+nivogli@users.noreply.github.com>",
+      "sourceUrl": "https://github.com/nivogli/MoltenVK",
+      "sourceCommits": [
+        "a6289be3e28ddbf7f9d87bd09f65946edebc6df7",
+        "bb88c75c7b28a235d1a7c519b0fda3acf60bb370"
+      ],
+      "summary": "Size tessellation scratch buffers from reflected shader output sizes and clamp indirect tessellated draws to them"
+    },
+    {
+      "order": 3,
+      "path": "patches/community/0103-keep-compute-barriers-in-compute-encoder.patch",
+      "sha256": "2665cf17d4584ba14d225bfe1c58efa1869d94f7cd2617cfe32a842b2d3cf850",
+      "kind": "community",
+      "author": "nivogli <224451320+nivogli@users.noreply.github.com>",
+      "sourceUrl": "https://github.com/nivogli/MoltenVK",
+      "sourceCommits": [
+        "49a7b097605e083a43faf863878b833be1bae3c2",
+        "2babf4277c9f11d03b348b14a389adeefc71cd12"
+      ],
+      "summary": "Keep compute-sourced barriers inside the open compute encoder with a memory barrier and a deferred fence update"
+    },
+    {
+      "order": 4,
+      "path": "patches/community/0104-ignore-top-and-bottom-of-pipe-for-kept-barriers.patch",
+      "sha256": "232b2e842593dec4fd04e5b4dbdf628bdac48d414ec8919c1e76681a3025d3a5",
+      "kind": "community",
+      "author": "nivogli <224451320+nivogli@users.noreply.github.com>",
+      "sourceUrl": "https://github.com/nivogli/MoltenVK",
+      "sourceCommits": [
+        "71bf4b4e8ef666ac0811da99b05df6a0da1d05c3"
+      ],
+      "summary": "Treat TOP_OF_PIPE source and BOTTOM_OF_PIPE destination as no stages when deciding to keep a barrier"
+    },
+    {
+      "order": 5,
+      "path": "patches/community/0105-concurrent-dispatch-when-barriers-honoured.patch",
+      "sha256": "d01c033b098d37eeec77f31666b69fafe7b5d3eda909ea3cc0d753afff231037",
+      "kind": "community",
+      "author": "nivogli <224451320+nivogli@users.noreply.github.com>",
+      "sourceUrl": "https://github.com/nivogli/MoltenVK",
+      "sourceCommits": [
+        "9674c5bd733e3e9c6434e18a4569d98ed772b93d"
+      ],
+      "summary": "Run vkCmdDispatch encoders concurrently, only when pipeline barriers are honoured in or between encoders"
+    },
+    {
+      "order": 6,
+      "path": "patches/community/0106-optimize-precise-math-in-fragment-and-compute.patch",
+      "sha256": "4f24535f3c2cf8dbe757282a90e0380d75cd363c968b423a7ad619e9d954a12b",
+      "kind": "community",
+      "author": "nivogli <224451320+nivogli@users.noreply.github.com>",
+      "sourceUrl": "https://github.com/nivogli/MoltenVK",
+      "sourceCommits": [
+        "3bf6ffe67e9df4fe4e5ae8e9552e548635f370b0"
+      ],
+      "summary": "Remove optnone from precise-math helpers in fragment and compute stages, decided from the Vulkan stage"
+    },
+    {
+      "order": 7,
+      "path": "patches/community/0107-cap-indirect-count-draws.patch",
+      "sha256": "9bd295519bc6ce63b25428584f0dc0b1ac9aa0417bf262893daf6c5761375ffc",
+      "kind": "community",
+      "author": "nivogli <224451320+nivogli@users.noreply.github.com>",
+      "sourceUrl": "https://github.com/nivogli/MoltenVK",
+      "sourceCommits": [
+        "08e692dc7bf68b1f40a852fa203ce329beb893ca",
+        "5546b02879570800600580ea5ad54166f931eec4",
+        "96793f1de5fd898a8e4ad3b7d7b52f23b8bac483",
+        "d496ec14f57c12f14e75d9e057b3667d9f466ade"
+      ],
+      "summary": "Cap Metal draws per indirect-count command at encode time, self-correcting upward"
+    },
+    {
+      "order": 8,
+      "path": "patches/community/0108-convert-indirect-count-before-rendering.patch",
+      "sha256": "989c2fd62b2a3b04c73211e535b3c15df007d6561030b1e798f491ee132f1919",
+      "kind": "community",
+      "author": "nivogli <224451320+nivogli@users.noreply.github.com>",
+      "sourceUrl": "https://github.com/nivogli/MoltenVK",
+      "sourceCommits": [
+        "d9503da35781d19cdf680da1e9883defe4dab0d5"
+      ],
+      "summary": "Convert indirect-count arguments before dynamic rendering begins, keeping the count each conversion was sized for"
+    }
+  ]
+}

@@ -1,0 +1,344 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: nivogli <224451320+nivogli@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 17:02:44 +0900
+Subject: [PATCH] Convert indirect-count arguments before dynamic rendering
+ begins
+
+Each vkCmdDraw[Indexed]IndirectCount ends the Metal render pass to run its
+conversion kernel and starts it again, which is expensive on a tile-based
+GPU. Before a dynamic rendering instance begins, encode the conversions of
+its draws in one compute encoder, so the draws need no restart.
+
+Adopted from https://github.com/nivogli/MoltenVK commit
+d9503da35781d19cdf680da1e9883defe4dab0d5.
+
+Modifications: the conversion records the draw count it was sized for, and
+the draw uses that count instead of reading the cap again, so a raised cap
+cannot make a draw read past the converted buffer. Statistics parameters
+and log output are dropped. Hoisting now also stops at vkCmdWaitEvents and
+vkCmdExecuteCommands, whose barriers it cannot inspect, and is skipped if
+a Metal render encoder is still open.
+
+Classic render passes are not hoisted, as they encode external dependency
+barriers as they begin. A multiview pass after the first converts in place,
+because the first pass consumes the hoisted conversion. With immediate
+encoding the following commands are not recorded yet, so draws also convert
+in place.
+
+MVK_PERF_HOIST_INDIRECT_COUNT=0 converts every draw in place.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ MoltenVK/MoltenVK/Commands/MVKCmdDraw.h       |  2 +
+ MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm      | 43 ++++++++++++++++---
+ MoltenVK/MoltenVK/Commands/MVKCmdPipeline.h   |  3 ++
+ MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm  | 13 ++++++
+ MoltenVK/MoltenVK/Commands/MVKCmdRendering.h  |  3 ++
+ MoltenVK/MoltenVK/Commands/MVKCommand.h       | 13 ++++++
+ MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h | 20 +++++++++
+ .../MoltenVK/Commands/MVKCommandBuffer.mm     | 14 ++++++
+ 8 files changed, 104 insertions(+), 7 deletions(-)
+
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.h b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.h
+index 687d1fcc..33c0d2ac 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.h
+@@ -162,6 +162,7 @@ public:
+ 						uint32_t stride);
+ 
+ 	void encode(MVKCommandEncoder* cmdEncoder) override;
++	void hoistIndirectCount(MVKCommandEncoder* cmdEncoder) override;
+ 
+ protected:
+ 	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
+@@ -208,6 +209,7 @@ public:
+ 
+ 	void encode(MVKCommandEncoder* cmdEncoder) override;
+ 	void encode(MVKCommandEncoder* cmdEncoder, const MVKIndexMTLBufferBinding& ibbOrig);
++	void hoistIndirectCount(MVKCommandEncoder* cmdEncoder) override;
+ 
+ protected:
+ 	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
+index 3b92dce1..268b6228 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
+@@ -702,11 +702,12 @@ static uint32_t cappedIndirectDrawCount(id<MTLDevice> mtlDevice, uint32_t maxDra
+ 		VkDeviceSize countBufferOffset,
+ 		uint32_t drawCount,
+ 		bool isCapped,
+-		bool indexed) {
++		bool indexed,
++		bool inRenderPass = true) {	// Downstream change: false when encoded before the render pass begins
+ 	VkDeviceSize commandSize = indexed ? sizeof(MTLDrawIndexedPrimitivesIndirectArguments) : sizeof(MTLDrawPrimitivesIndirectArguments);
+ 	auto* convertedBuffer = cmdEncoder->getTempMTLBuffer(commandSize * drawCount, true);
+ 
+-	cmdEncoder->encodeStoreActions(true);
++	if (inRenderPass) { cmdEncoder->encodeStoreActions(true); }
+ 	auto* computeEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseDrawIndirectConvertBuffers);
+ 	MVKMetalComputeCommandEncoderState& state = cmdEncoder->getMtlCompute();
+ 	id<MTLComputePipelineState> pipeline = cmdEncoder->getCommandEncodingPool()->getCmdDrawIndirectCountConvertBuffersMTLComputePipelineState(indexed);
+@@ -730,7 +731,7 @@ static uint32_t cappedIndirectDrawCount(id<MTLDevice> mtlDevice, uint32_t maxDra
+ 		[computeEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(drawCount, threadWidth), 1, 1)
+ 						  threadsPerThreadgroup: MTLSizeMake(threadWidth, 1, 1)];
+ 	}
+-	cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
++	if (inRenderPass) { cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass); }
+ 	return convertedBuffer;
+ }
+ 
+@@ -917,6 +918,15 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 	diiCmd.encode(cmdEncoder, ibb);
+ }
+ 
++// Downstream change (not in upstream MoltenVK): see MVKCommandEncoder::hoistIndirectCounts().
++void MVKCmdDrawIndirect::hoistIndirectCount(MVKCommandEncoder* cmdEncoder) {
++	if ( !_mtlCountBuffer || _drawCount == 0 ) { return; }
++	uint32_t drawCount = cappedIndirectDrawCount(cmdEncoder->getMTLDevice(), _drawCount);
++	cmdEncoder->addHoistedIndirectCount(this, {encodeIndirectCountConversion(cmdEncoder, _mtlIndirectBuffer, _mtlIndirectBufferOffset,
++																			 _mtlIndirectBufferStride, _mtlCountBuffer, _mtlCountBufferOffset,
++																			 drawCount, drawCount < _drawCount, false, false), drawCount});
++}
++
+ void MVKCmdDrawIndirect::encode(MVKCommandEncoder* cmdEncoder) {
+ 
+ 	cmdEncoder->restartMetalRenderPassIfNeeded();
+@@ -927,8 +937,12 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 	// Downstream change: this count is the only one used below, so every buffer matches the dispatch that writes it.
+ 	uint32_t drawCount = _drawCount;
+ 	if (_mtlCountBuffer && _drawCount > 0) {
+-		drawCount = cappedIndirectDrawCount(cmdEncoder->getMTLDevice(), _drawCount);
+-		auto* convertedBuffer = encodeIndirectCountConversion(cmdEncoder,
++		auto hoisted = cmdEncoder->takeHoistedIndirectCount(this);	// Downstream change: its count sized its buffer
++		auto* convertedBuffer = hoisted.converted;
++		drawCount = hoisted.drawCount;
++		if ( !convertedBuffer ) {
++			drawCount = cappedIndirectDrawCount(cmdEncoder->getMTLDevice(), _drawCount);
++			convertedBuffer = encodeIndirectCountConversion(cmdEncoder,
+ 				indirectBuffer,
+ 				indirectBufferOffset,
+ 				indirectBufferStride,
+@@ -937,6 +951,7 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 				drawCount,
+ 				drawCount < _drawCount,
+ 				false);
++		}
+ 		indirectBuffer = convertedBuffer->_mtlBuffer;
+ 		indirectBufferOffset = convertedBuffer->_offset;
+ 		indirectBufferStride = sizeof(MTLDrawPrimitivesIndirectArguments);
+@@ -1271,6 +1286,15 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 	return VK_SUCCESS;
+ }
+ 
++// Downstream change (not in upstream MoltenVK): see MVKCommandEncoder::hoistIndirectCounts().
++void MVKCmdDrawIndexedIndirect::hoistIndirectCount(MVKCommandEncoder* cmdEncoder) {
++	if ( !_mtlCountBuffer || _drawCount == 0 ) { return; }
++	uint32_t drawCount = cappedIndirectDrawCount(cmdEncoder->getMTLDevice(), _drawCount);
++	cmdEncoder->addHoistedIndirectCount(this, {encodeIndirectCountConversion(cmdEncoder, _mtlIndirectBuffer, _mtlIndirectBufferOffset,
++																			 _mtlIndirectBufferStride, _mtlCountBuffer, _mtlCountBufferOffset,
++																			 drawCount, drawCount < _drawCount, true, false), drawCount});
++}
++
+ void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder) {
+ 	cmdEncoder->restartMetalRenderPassIfNeeded();
+ 	encode(cmdEncoder, cmdEncoder->getVkGraphics()._indexBuffer);
+@@ -1284,8 +1308,12 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 	// Downstream change: this count is the only one used below, so every buffer matches the dispatch that writes it.
+ 	uint32_t drawCount = _drawCount;
+ 	if (_mtlCountBuffer && _drawCount > 0) {
+-		drawCount = cappedIndirectDrawCount(cmdEncoder->getMTLDevice(), _drawCount);
+-		auto* convertedBuffer = encodeIndirectCountConversion(cmdEncoder,
++		auto hoisted = cmdEncoder->takeHoistedIndirectCount(this);	// Downstream change: its count sized its buffer
++		auto* convertedBuffer = hoisted.converted;
++		drawCount = hoisted.drawCount;
++		if ( !convertedBuffer ) {
++			drawCount = cappedIndirectDrawCount(cmdEncoder->getMTLDevice(), _drawCount);
++			convertedBuffer = encodeIndirectCountConversion(cmdEncoder,
+ 				indirectBuffer,
+ 				indirectBufferOffset,
+ 				indirectBufferStride,
+@@ -1294,6 +1322,7 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 				drawCount,
+ 				drawCount < _drawCount,
+ 				true);
++		}
+ 		indirectBuffer = convertedBuffer->_mtlBuffer;
+ 		indirectBufferOffset = convertedBuffer->_offset;
+ 		indirectBufferStride = sizeof(MTLDrawIndexedPrimitivesIndirectArguments);
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.h b/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.h
+index 5119f856..099756a9 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.h
+@@ -46,6 +46,7 @@ public:
+ 						const VkCommandBuffer* pCommandBuffers);
+ 
+ 	void encode(MVKCommandEncoder* cmdEncoder) override;
++	bool blocksIndirectCountHoist() override { return true; }	// Downstream change: a secondary may hold a barrier
+ 
+ protected:
+ 	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
+@@ -84,6 +85,7 @@ public:
+ 						const VkImageMemoryBarrier* pImageMemoryBarriers);
+ 
+ 	void encode(MVKCommandEncoder* cmdEncoder) override;
++	bool blocksIndirectCountHoist() override;	// Downstream change: see MVKCommandEncoder::hoistIndirectCounts()
+ 
+ protected:
+ 	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
+@@ -378,6 +380,7 @@ public:
+ 						const VkImageMemoryBarrier* pImageMemoryBarriers);
+ 
+ 	void encode(MVKCommandEncoder* cmdEncoder) override;
++	bool blocksIndirectCountHoist() override { return true; }	// Downstream change: its barriers are not inspected
+ 
+ protected:
+ 	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm b/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm
+index 8b899657..4a13f39e 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm
+@@ -111,6 +111,19 @@
+ 	return VK_SUCCESS;
+ }
+ 
++// Downstream change (not in upstream MoltenVK): a barrier inside a render pass that makes writes visible to indirect
++// reads, or is not specific about it, means indirect arguments may change within the pass, so draws after it must
++// convert their arguments where they are, not before the pass.
++template <size_t N>
++bool MVKCmdPipelineBarrier<N>::blocksIndirectCountHoist() {
++	static const VkPipelineStageFlags2 stages = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
++	static const VkAccessFlags2 access = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
++	for (auto& b : _barriers) {
++		if (mvkIsAnyFlagEnabled(b.dstStageMask, stages) || mvkIsAnyFlagEnabled(b.dstAccessMask, access)) { return true; }
++	}
++	return false;
++}
++
+ template <size_t N>
+ void MVKCmdPipelineBarrier<N>::encode(MVKCommandEncoder* cmdEncoder) {
+ 	
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h b/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h
+index 142499dd..2cfd135b 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h
+@@ -129,6 +129,7 @@ public:
+ 						const VkSubpassEndInfo* pSubpassEndInfo);
+ 
+ 	void encode(MVKCommandEncoder* cmdEncoder) override;
++	bool endsRenderPass() override { return true; }	// Downstream change: see MVKCommandEncoder::hoistIndirectCounts()
+ 
+ protected:
+ 	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
+@@ -151,6 +152,7 @@ public:
+ 						const VkRenderingInfo* pRenderingInfo);
+ 
+ 	void encode(MVKCommandEncoder* cmdEncoder) override;
++	bool beginsDynamicRendering() override { return true; }	// Downstream change: see MVKCommandEncoder::hoistIndirectCounts()
+ 
+ 
+ protected:
+@@ -218,6 +220,7 @@ public:
+ 	VkResult setContent(MVKCommandBuffer* cmdBuff);
+ 
+ 	void encode(MVKCommandEncoder* cmdEncoder) override;
++	bool endsRenderPass() override { return true; }	// Downstream change: see MVKCommandEncoder::hoistIndirectCounts()
+ 
+ protected:
+ 	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommand.h b/MoltenVK/MoltenVK/Commands/MVKCommand.h
+index ca029013..ff1642ce 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommand.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCommand.h
+@@ -67,6 +67,19 @@ public:
+ 	/** Encodes this command on the specified command encoder. */
+ 	virtual void encode(MVKCommandEncoder* cmdEncoder) = 0;
+ 
++	// Downstream change (not in upstream MoltenVK): converting indirect-count arguments before a render pass.
++	/** True for commands that begin a dynamic rendering instance. Classic render passes encode barriers as they begin. */
++	virtual bool beginsDynamicRendering() { return false; }
++
++	/** True for commands that end a Vulkan render pass. */
++	virtual bool endsRenderPass() { return false; }
++
++	/** True if indirect draws after this command must not be converted before the render pass. */
++	virtual bool blocksIndirectCountHoist() { return false; }
++
++	/** Encodes this command's indirect-count conversion now, before its render pass begins. */
++	virtual void hoistIndirectCount(MVKCommandEncoder* cmdEncoder) {}
++
+ protected:
+ 	friend MVKCommandBuffer;
+ 
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h
+index 56fde609..2d138418 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h
+@@ -438,6 +438,24 @@ public:
+     /** Get a temporary MTLBuffer that will be returned to a pool after the command buffer is finished. */
+     const MVKMTLBufferAllocation* getTempMTLBuffer(NSUInteger length, bool isPrivate = false, bool isDedicated = false);
+ 
++	/** Downstream change (not in upstream MoltenVK): an indirect-count conversion encoded before its command's render pass. */
++	struct HoistedIndirectCount {
++		const MVKMTLBufferAllocation* converted = nullptr;
++		uint32_t drawCount = 0;
++	};
++
++	/** Records a conversion encoded before the command's render pass, with the draw count it was sized for. */
++	void addHoistedIndirectCount(const MVKCommand* cmd, HoistedIndirectCount hoisted) { _hoistedIndirectCounts[cmd] = hoisted; }
++
++	/** Returns and forgets the conversion encoded before the render pass for this command, if any. */
++	HoistedIndirectCount takeHoistedIndirectCount(const MVKCommand* cmd) {
++		auto it = _hoistedIndirectCounts.find(cmd);
++		if (it == _hoistedIndirectCounts.end()) { return {}; }
++		auto hoisted = it->second;
++		_hoistedIndirectCounts.erase(it);
++		return hoisted;
++	}
++
+ 	/** Copy the bytes to a temporary MTLBuffer that will be returned to a pool after the command buffer is finished. */
+ 	const MVKMTLBufferAllocation* copyToTempMTLBufferAllocation(const void* bytes, NSUInteger length, bool isDedicated = false);
+ 
+@@ -543,6 +561,7 @@ protected:
+ 	bool hasMoreMultiviewPasses();
+ 	void beginNextMultiviewPass();
+ 	void encodeCommandsImpl(MVKCommand* command);
++	void hoistIndirectCounts(MVKCommand* firstInRenderPass);
+ 	void encodeGPUCounterSample(MVKGPUCounterQueryPool* mvkQryPool, uint32_t sampleIndex, MVKCounterSamplingFlags samplingPoints);
+ 	void encodeTimestampStageCounterSamples();
+ 	id<MTLFence> getStageCountersMTLFence();
+@@ -569,6 +588,7 @@ protected:
+ 	VkSubpassContents _subpassContents;
+ 	uint32_t _renderSubpassIndex;
+ 	uint32_t _multiviewPassIndex;
++	std::unordered_map<const MVKCommand*, HoistedIndirectCount> _hoistedIndirectCounts;
+     uint32_t _flushCount;
+ 	uint64_t _deferredBarrierSrc = 0;				// Downstream change: see tryKeepBarrierInComputeEncoder()
+ 	uint64_t _deferredBarrierDst = 0;
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
+index 82ca5c54..f6fd837b 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
+@@ -448,9 +448,23 @@
+ 	}
+ }
+ 
++// Downstream change (not in upstream MoltenVK): before dynamic rendering begins, encode the indirect-count conversions of
++// its draws in one compute encoder, so none of them has to end and restart the Metal render pass. Stops at the end of the
++// pass, or at a command that could make new indirect arguments visible within it; later draws convert in place. So do
++// multiview passes after the first, and immediate encoding, where the following commands are not recorded yet.
++// MVK_PERF_HOIST_INDIRECT_COUNT=0 converts every draw in place.
++void MVKCommandEncoder::hoistIndirectCounts(MVKCommand* firstInRenderPass) {
++	static const bool enabled = mvkGetEnvVarNumber("MVK_PERF_HOIST_INDIRECT_COUNT", 1) != 0;
++	if ( !enabled || _mtlRenderEncoder ) { return; }
++	for (MVKCommand* cmd = firstInRenderPass; cmd && !cmd->endsRenderPass() && !cmd->blocksIndirectCountHoist(); cmd = cmd->_next) {
++		cmd->hoistIndirectCount(this);
++	}
++}
++
+ void MVKCommandEncoder::encodeCommandsImpl(MVKCommand* command) {
+     while(command) {
+         uint32_t prevMVPassIdx = _multiviewPassIndex;
++		if (command->beginsDynamicRendering()) { hoistIndirectCounts(command->_next); }
+         command->encode(this);
+ 
+         if(_multiviewPassIndex > prevMVPassIdx) {

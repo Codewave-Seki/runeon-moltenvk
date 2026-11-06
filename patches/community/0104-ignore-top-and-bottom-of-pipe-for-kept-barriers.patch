@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: nivogli <224451320+nivogli@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 17:00:02 +0900
+Subject: [PATCH] Ignore TOP_OF_PIPE source and BOTTOM_OF_PIPE dest for kept
+ barriers
+
+TOP_OF_PIPE in a barrier's first synchronization scope and BOTTOM_OF_PIPE
+in its second are equivalent to NONE, but MoltenVK maps both to every
+stage. A compute barrier that also names one of them would therefore
+never stay inside the compute encoder.
+
+Adopted from https://github.com/nivogli/MoltenVK commit
+71bf4b4e8ef666ac0811da99b05df6a0da1d05c3.
+
+Modifications: none in behaviour. Only the decision to keep a barrier in
+the compute encoder changes, as in that commit, so
+MVK_PERF_KEEP_COMPUTE_ENCODER=0 also disables this. The fence path and
+render pass dependencies still map these bits to every stage, which only
+synchronizes more; the wider
+https://github.com/KhronosGroup/MoltenVK/pull/2891 was not tested here.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm b/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm
+index a2091cef..8b899657 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm
+@@ -167,8 +167,10 @@
+ 		uint64_t srcStages = 0, dstStages = 0;
+ 		bool touchesHost = false, coversIndirectArgs = false;
+ 		for (auto& b : _barriers) {
+-			srcStages |= mvkBarrierStagesFromPipelineStageFlags(b.srcStageMask);
+-			dstStages |= mvkBarrierStagesFromPipelineStageFlags(b.dstStageMask);
++			// TOP_OF_PIPE in the first scope and BOTTOM_OF_PIPE in the second are equivalent
++			// to NONE in Vulkan, but mvkBarrierStagesFromPipelineStageFlags() maps them to every stage.
++			srcStages |= mvkBarrierStagesFromPipelineStageFlags(b.srcStageMask & ~VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT);
++			dstStages |= mvkBarrierStagesFromPipelineStageFlags(b.dstStageMask & ~VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
+ 			touchesHost |= mvkIsAnyFlagEnabled(b.srcStageMask | b.dstStageMask, VK_PIPELINE_STAGE_HOST_BIT);
+ 			coversIndirectArgs |= mvkIsAnyFlagEnabled(b.dstStageMask, VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+ 		}

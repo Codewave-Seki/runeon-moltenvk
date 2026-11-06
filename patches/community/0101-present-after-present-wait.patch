@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dirk Fortmeier <d.fortmeier@gmail.com>
+Date: Fri, 6 Nov 2026 16:58:02 +0900
+Subject: [PATCH] Present drawables only after the present wait semaphores
+ signal
+
+MVKPresentableSwapchainImage::presentCAMetalDrawable() called
+[CAMetalDrawable present] from a scheduled-handler of the present
+MTLCommandBuffer. That handler can run before the GPU has resolved the
+encoded MTLEvent waits on the present wait semaphores, and Metal only
+defers displaying a drawable for pending render passes that target it.
+When the last write to a swapchain image comes from a compute dispatch
+or a transfer, the image was displayed before that work had finished.
+
+Present from the completed-handler of the present MTLCommandBuffer
+instead, whose completion implies the wait semaphores have been signaled.
+
+Adopted from https://github.com/fortmeier/MoltenVK/pull/1 (commit
+a58d6bcf04ac4a8c1f59652b340411dde760b33a), for
+https://github.com/KhronosGroup/MoltenVK/issues/2588.
+
+Modifications: the MVKImage.mm change is unchanged apart from one added
+modification notice comment; the Docs/Whats_New.md hunk is dropped.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ MoltenVK/MoltenVK/GPUObjects/MVKImage.mm | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
+index 2b394922..226c4214 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
+@@ -1650,13 +1650,18 @@ static void signalAndUntrack(const MVKSwapchainSignaler& signaler) {
+ 															  MVKImagePresentInfo presentInfo) {
+ 	_swapchain->renderWatermark(getMTLTexture(0), mtlCmdBuff);
+ 
+-	// According to Apple, it is more performant to call MTLDrawable present from within a
+-	// MTLCommandBuffer scheduled-handler than it is to call MTLCommandBuffer presentDrawable:.
+-	// But get current drawable now, intead of in handler, because a new drawable might be acquired by then.
++	// Downstream change (not in upstream MoltenVK): completed-handler instead of scheduled-handler.
++	// Present from a MTLCommandBuffer completed-handler. The present MTLCommandBuffer holds the encoded
++	// waits on the present wait semaphores, so its completion is the point at which those semaphores
++	// have been signaled. A scheduled-handler, or MTLCommandBuffer presentDrawable:, can run before the
++	// GPU has resolved those waits, and Metal only defers the display of a drawable for pending render
++	// passes that target it. Content written to the drawable by compute or transfer commands would
++	// then be displayed before those commands finish.
++	// Get current drawable now, intead of in handler, because a new drawable might be acquired by then.
+ 	// Attach present handler before presenting to avoid race condition.
+ 	id<CAMetalDrawable> mtlDrwbl = getCAMetalDrawable();
+ 	MVKSwapchainSignaler signaler = getPresentationSignaler();
+-	[mtlCmdBuff addScheduledHandler: ^(id<MTLCommandBuffer> mcb) {
++	[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer> mcb) {
+ 
+ 		addPresentedHandler(mtlDrwbl, presentInfo, signaler);
+ 

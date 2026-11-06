@@ -1,0 +1,432 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: nivogli <224451320+nivogli@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 17:02:09 +0900
+Subject: [PATCH] Cap the Metal draws encoded per indirect-count command
+
+MoltenVK encodes maxDrawCount Metal indirect draws on the CPU for every
+vkCmdDraw[Indexed]IndirectCount and zeroes the unused ones on the GPU. An
+application that passes a maxDrawCount far above its real counts pays for
+every one of them. Encode at most a cap of 256 draws per command instead.
+
+The cap corrects itself. A conversion kernel counts commands whose real
+count exceeded their cap, and each new truncation seen at encode time
+doubles the cap, which is never lowered. One stderr line records a raise.
+
+Adopted from https://github.com/nivogli/MoltenVK commits
+08e692dc7bf68b1f40a852fa203ce329beb893ca,
+5546b02879570800600580ea5ad54166f931eec4,
+96793f1de5fd898a8e4ad3b7d7b52f23b8bac483 and the needed part of
+d496ec14f57c12f14e75d9e057b3667d9f466ade.
+
+Modifications:
+- Those commits lowered _drawCount in setContent(), at record time, so
+  command buffers submitted again kept dropping draws and a raised cap
+  never reached them. _drawCount now keeps the application's maxDrawCount;
+  each encode path reads the cap once into a local count and uses that
+  count for every buffer size and dispatch, so nothing is sized by a
+  different value than the dispatch writing it, also if the cap rises
+  between calls. The triangle-fan path receives the count as an argument.
+- A prefilled command buffer keeps the cap of its encode for that one
+  submission. MoltenVK clears it on submit and later submissions encode
+  again with the current cap. Immediate encoding behaves the same.
+- Self-correction is always on with the cap, and the only switch is
+  MVK_PERF_ICOUNT_MAX_DRAWS. MVK_PERF_ICOUNT_STATS, histograms, summary
+  prints and all counters except truncation are removed. The decay of
+  34f8bc8644963f90bac0b70b14b07fac30cae2c4 is dropped; it was dead after
+  96793f1d. No new file: the helpers live in MVKCmdDraw.mm.
+- The upper limit on the cap is removed, because a real count above it
+  would have dropped draws forever.
+- The counter is process-wide. A device other than the first gets no cap
+  rather than a counter bound to the wrong device.
+
+Residual: the first time a real count exceeds the cap, draws can be
+missing until the raise takes effect, for a few frames if it needs more
+than one doubling. MVK_PERF_ICOUNT_MAX_DRAWS=0 disables the cap.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ MoltenVK/MoltenVK/Commands/MVKCmdDraw.h       |   3 +-
+ MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm      | 129 +++++++++++++-----
+ ...KCommandPipelineStateFactoryShaderSource.h |   6 +
+ 3 files changed, 103 insertions(+), 35 deletions(-)
+
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.h b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.h
+index 9afc3ed8..687d1fcc 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.h
+@@ -168,7 +168,8 @@ protected:
+ 	void encodeIndexedIndirect(MVKCommandEncoder* cmdEncoder,
+ 								 id<MTLBuffer> indirectBuffer,
+ 								 VkDeviceSize indirectBufferOffset,
+-								 uint32_t indirectBufferStride);
++								 uint32_t indirectBufferStride,
++								 uint32_t drawCount);
+ 
+ 	id<MTLBuffer> _mtlIndirectBuffer;
+ 	VkDeviceSize _mtlIndirectBufferOffset;
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
+index 0c47728c..3b92dce1 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
+@@ -23,6 +23,7 @@
+ #include "MVKPipeline.h"
+ #include "MVKFoundation.h"
+ #include "mvk_datatypes.hpp"
++#include <atomic>
+ 
+ 
+ #pragma mark -
+@@ -647,6 +648,51 @@
+ // require yet more munging of the indirect buffers...
+ static const uint32_t kMVKMaxDrawIndirectVertexCount = 1024 * KIBI;
+ 
++// Downstream change (not in upstream MoltenVK): a cap on the Metal draws encoded for one vkCmdDraw[Indexed]IndirectCount.
++// MoltenVK encodes maxDrawCount Metal indirect draws on the CPU for every such command and zeroes the unused ones on the
++// GPU, so a large maxDrawCount costs CPU time per draw even when few are real. The cap is read at encode time, so a
++// command buffer submitted again gets the current cap. A conversion kernel counts the commands whose real count exceeded
++// their cap, and each increase seen here doubles the cap for later encodes. It is never lowered.
++// Residual: the first time a real count exceeds the cap, draws can be missing until the raise takes effect.
++// A prefilled command buffer keeps the cap of its encode for that one submission; later submissions encode again.
++// MVK_PERF_ICOUNT_MAX_DRAWS sets the initial cap (default 256); 0 disables the cap and its counter.
++static std::atomic<uint32_t>& indirectCountCap() {
++	static std::atomic<uint32_t> cap { [] {
++		double n = mvkGetEnvVarNumber("MVK_PERF_ICOUNT_MAX_DRAWS", 256);
++		return n >= 1 ? (uint32_t)std::min(n, (double)UINT32_MAX) : 0u;
++	}() };
++	return cap;
++}
++
++// ponytail: one process-wide counter, bound to the first MTLDevice that needs it and never released.
++// Other devices get no cap at all; a per-device counter is the fix if that ever matters.
++static id<MTLBuffer> indirectCountTruncationCounter(id<MTLDevice> mtlDevice) {
++	static id<MTLBuffer> counter = [mtlDevice newBufferWithLength: sizeof(uint32_t)
++														  options: MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked];
++	return counter.device == mtlDevice ? counter : nil;
++}
++
++static void raiseIndirectCountCapIfTruncated(id<MTLBuffer> counter) {
++	static std::atomic<uint32_t> lastSeen {0};
++	uint32_t seen = *(const volatile uint32_t*)counter.contents;	// the GPU may lag a little; the next look catches up
++	if (lastSeen.exchange(seen, std::memory_order_relaxed) == seen) { return; }
++
++	uint32_t cap = indirectCountCap().load(std::memory_order_relaxed);
++	uint32_t raised = cap > UINT32_MAX / 2 ? UINT32_MAX : cap * 2;
++	indirectCountCap().store(raised, std::memory_order_relaxed);
++	fprintf(stderr, "[mvk-perf] indirect-count draw cap raised from %u to %u after truncated draws\n", cap, raised);
++}
++
++// The number of Metal draws to encode now for an indirect-count command with this maxDrawCount.
++static uint32_t cappedIndirectDrawCount(id<MTLDevice> mtlDevice, uint32_t maxDrawCount) {
++	uint32_t cap = indirectCountCap().load(std::memory_order_relaxed);
++	if ( !cap || maxDrawCount <= cap ) { return maxDrawCount; }
++	id<MTLBuffer> counter = indirectCountTruncationCounter(mtlDevice);
++	if ( !counter ) { return maxDrawCount; }
++	raiseIndirectCountCapIfTruncated(counter);
++	return std::min(maxDrawCount, indirectCountCap().load(std::memory_order_relaxed));
++}
++
+ static const MVKMTLBufferAllocation* encodeIndirectCountConversion(
+ 		MVKCommandEncoder* cmdEncoder,
+ 		id<MTLBuffer> indirectBuffer,
+@@ -655,6 +701,7 @@
+ 		id<MTLBuffer> countBuffer,
+ 		VkDeviceSize countBufferOffset,
+ 		uint32_t drawCount,
++		bool isCapped,
+ 		bool indexed) {
+ 	VkDeviceSize commandSize = indexed ? sizeof(MTLDrawIndexedPrimitivesIndirectArguments) : sizeof(MTLDrawPrimitivesIndirectArguments);
+ 	auto* convertedBuffer = cmdEncoder->getTempMTLBuffer(commandSize * drawCount, true);
+@@ -669,6 +716,11 @@
+ 	state.bindStructBytes(computeEncoder, &indirectBufferStride, 2);
+ 	state.bindStructBytes(computeEncoder, &drawCount, 3);
+ 	state.bindBuffer(computeEncoder, countBuffer, countBufferOffset, 4);
++	// Downstream change: the kernel only touches buffer 5 if isCapped; otherwise any bound buffer satisfies it.
++	id<MTLBuffer> counter = isCapped ? indirectCountTruncationCounter(cmdEncoder->getMTLDevice()) : convertedBuffer->_mtlBuffer;
++	state.bindBuffer(computeEncoder, counter, isCapped ? 0 : convertedBuffer->_offset, 5);
++	uint32_t isCappedArg = isCapped;
++	state.bindStructBytes(computeEncoder, &isCappedArg, 6);
+ 
+ 	NSUInteger threadWidth = pipeline.threadExecutionWidth;
+ 	if (cmdEncoder->getMetalFeatures().nonUniformThreadgroups) {
+@@ -819,11 +871,12 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ void MVKCmdDrawIndirect::encodeIndexedIndirect(MVKCommandEncoder* cmdEncoder,
+ 														 id<MTLBuffer> indirectBuffer,
+ 														 VkDeviceSize indirectBufferOffset,
+-														 uint32_t indirectBufferStride) {
++														 uint32_t indirectBufferStride,
++														 uint32_t drawCount) {
+ 
+ 	// Create an indexed indirect buffer to be populated from the non-indexed indirect buffer.
+ 	uint32_t indirectIdxBuffStride = sizeof(MTLDrawIndexedPrimitivesIndirectArguments);
+-	auto* indirectIdxBuff = cmdEncoder->getTempMTLBuffer(indirectIdxBuffStride * _drawCount, true);
++	auto* indirectIdxBuff = cmdEncoder->getTempMTLBuffer(indirectIdxBuffStride * drawCount, true);
+ 
+ 	// Create an index buffer to be populated with synthetic indexes.
+ 	MTLIndexType mtlIdxType = MTLIndexTypeUInt32;
+@@ -843,13 +896,13 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 	state.bindBuffer(mtlConvertEncoder, indirectBuffer,              indirectBufferOffset,      0);
+ 	state.bindBuffer(mtlConvertEncoder, indirectIdxBuff->_mtlBuffer, indirectIdxBuff->_offset, 1);
+ 	state.bindStructBytes(mtlConvertEncoder, &indirectBufferStride,     2);
+-	state.bindStructBytes(mtlConvertEncoder, &_drawCount,               3);
++	state.bindStructBytes(mtlConvertEncoder, &drawCount,               3);
+ 	state.bindBuffer(mtlConvertEncoder, ibb.mtlBuffer, ibb.offset, 4);
+ 	if (cmdEncoder->getMetalFeatures().nonUniformThreadgroups) {
+-		[mtlConvertEncoder dispatchThreads: MTLSizeMake(_drawCount, 1, 1)
++		[mtlConvertEncoder dispatchThreads: MTLSizeMake(drawCount, 1, 1)
+ 					 threadsPerThreadgroup: MTLSizeMake(mtlConvertState.threadExecutionWidth, 1, 1)];
+ 	} else {
+-		[mtlConvertEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(_drawCount, mtlConvertState.threadExecutionWidth), 1, 1)
++		[mtlConvertEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(drawCount, mtlConvertState.threadExecutionWidth), 1, 1)
+ 						  threadsPerThreadgroup: MTLSizeMake(mtlConvertState.threadExecutionWidth, 1, 1)];
+ 	}
+ 	// Switch back to rendering now.
+@@ -859,7 +912,7 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 	diiCmd.setContent(cmdEncoder->_cmdBuffer,
+ 					  indirectIdxBuff->_mtlBuffer,
+ 					  indirectIdxBuff->_offset,
+-					  _drawCount,
++					  drawCount,
+ 					  indirectIdxBuffStride);
+ 	diiCmd.encode(cmdEncoder, ibb);
+ }
+@@ -871,14 +924,18 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 	VkDeviceSize indirectBufferOffset = _mtlIndirectBufferOffset;
+ 	uint32_t indirectBufferStride = _mtlIndirectBufferStride;
+ 
++	// Downstream change: this count is the only one used below, so every buffer matches the dispatch that writes it.
++	uint32_t drawCount = _drawCount;
+ 	if (_mtlCountBuffer && _drawCount > 0) {
++		drawCount = cappedIndirectDrawCount(cmdEncoder->getMTLDevice(), _drawCount);
+ 		auto* convertedBuffer = encodeIndirectCountConversion(cmdEncoder,
+ 				indirectBuffer,
+ 				indirectBufferOffset,
+ 				indirectBufferStride,
+ 				_mtlCountBuffer,
+ 				_mtlCountBufferOffset,
+-				_drawCount,
++				drawCount,
++				drawCount < _drawCount,
+ 				false);
+ 		indirectBuffer = convertedBuffer->_mtlBuffer;
+ 		indirectBufferOffset = convertedBuffer->_offset;
+@@ -890,7 +947,7 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 	auto& dvcLimits = cmdEncoder->getDeviceProperties().limits;
+ 	// Metal doesn't support triangle fans, so encode it as indexed indirect triangles instead.
+ 	if (pipeline->getVkPrimitiveTopology() == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) {
+-		encodeIndexedIndirect(cmdEncoder, indirectBuffer, indirectBufferOffset, indirectBufferStride);
++		encodeIndexedIndirect(cmdEncoder, indirectBuffer, indirectBufferOffset, indirectBufferStride, drawCount);
+ 		return;
+ 	}
+ 
+@@ -899,7 +956,7 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 			indirectBuffer,
+ 			indirectBufferOffset,
+ 			indirectBufferStride,
+-			_drawCount,
++			drawCount,
+ 			false);
+ 
+     cmdEncoder->_isIndexedDraw = false;
+@@ -936,9 +993,9 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+         outControlPointCount = pipeline->getOutputControlPointCount();
+         vertexCount = kMVKMaxDrawIndirectVertexCount;
+         patchCount = mvkCeilingDivide(vertexCount, inControlPointCount);
+-        VkDeviceSize indirectSize = (2 * sizeof(MTLDispatchThreadgroupsIndirectArguments) + sizeof(MTLDrawPatchIndirectArguments) + sizeof(MTLStageInRegionIndirectArguments)) * _drawCount;
++        VkDeviceSize indirectSize = (2 * sizeof(MTLDispatchThreadgroupsIndirectArguments) + sizeof(MTLDrawPatchIndirectArguments) + sizeof(MTLStageInRegionIndirectArguments)) * drawCount;
+ 		paramsIncr = std::max((size_t)dvcLimits.minUniformBufferOffsetAlignment, sizeof(uint32_t) * 2);
+-		VkDeviceSize paramsSize = paramsIncr * _drawCount;
++		VkDeviceSize paramsSize = paramsIncr * drawCount;
+         tempIndirectBuff = cmdEncoder->getTempMTLBuffer(indirectSize, true);
+         mtlIndBuff = tempIndirectBuff->_mtlBuffer;
+         mtlIndBuffOfst = tempIndirectBuff->_offset;
+@@ -964,7 +1021,7 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+         }
+     } else if (needsInstanceAdjustment) {
+         // In this case, we need to adjust the instance count for the views being drawn.
+-        VkDeviceSize indirectSize = sizeof(MTLDrawPrimitivesIndirectArguments) * _drawCount;
++        VkDeviceSize indirectSize = sizeof(MTLDrawPrimitivesIndirectArguments) * drawCount;
+         tempIndirectBuff = cmdEncoder->getTempMTLBuffer(indirectSize, true);
+         mtlIndBuff = tempIndirectBuff->_mtlBuffer;
+         mtlIndBuffOfst = tempIndirectBuff->_offset;
+@@ -974,14 +1031,14 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+     pipeline->getStages(stages);
+ 
+     if (pipeline->needsDrawIdBuffer()) {
+-        tempDrawIDBuff = cmdEncoder->getTempMTLBuffer(_drawCount * sizeof(uint32_t));
++        tempDrawIDBuff = cmdEncoder->getTempMTLBuffer(drawCount * sizeof(uint32_t));
+ 
+         auto* drawIDs = (uint32_t*)((char*)[tempDrawIDBuff->_mtlBuffer contents] + tempDrawIDBuff->_offset);
+-        for (uint32_t i = 0; i < _drawCount; i++) {
++        for (uint32_t i = 0; i < drawCount; i++) {
+             drawIDs[i] = i;
+         }
+     }
+-    for (uint32_t drawIdx = 0; drawIdx < _drawCount; drawIdx++) {
++    for (uint32_t drawIdx = 0; drawIdx < drawCount; drawIdx++) {
+         for (uint32_t s : stages) {
+             auto stage = MVKGraphicsStage(s);
+             id<MTLComputeCommandEncoder> mtlTessCtlEncoder = nil;
+@@ -1001,15 +1058,15 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 				state.bindStructBytes(mtlTessCtlEncoder, &indirectBufferStride,     3);
+ 				state.bindStructBytes(mtlTessCtlEncoder, &inControlPointCount,      4);
+ 				state.bindStructBytes(mtlTessCtlEncoder, &outControlPointCount,     5);
+-				state.bindStructBytes(mtlTessCtlEncoder, &_drawCount,               6);
++				state.bindStructBytes(mtlTessCtlEncoder, &drawCount,               6);
+ 				state.bindStructBytes(mtlTessCtlEncoder, &vtxThreadExecWidth,       7);
+ 				state.bindStructBytes(mtlTessCtlEncoder, &tcWorkgroupSize,          8);
+ 				state.bindStructBytes(mtlTessCtlEncoder, &vertexCount,              9);	// Downstream change: clamp bound for the kernel
+ 				if (mtlFeats.nonUniformThreadgroups) {
+-					[mtlTessCtlEncoder dispatchThreads: MTLSizeMake(_drawCount, 1, 1)
++					[mtlTessCtlEncoder dispatchThreads: MTLSizeMake(drawCount, 1, 1)
+ 								 threadsPerThreadgroup: MTLSizeMake(mtlConvertState.threadExecutionWidth, 1, 1)];
+ 				} else {
+-					[mtlTessCtlEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(_drawCount, mtlConvertState.threadExecutionWidth), 1, 1)
++					[mtlTessCtlEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(drawCount, mtlConvertState.threadExecutionWidth), 1, 1)
+ 									  threadsPerThreadgroup: MTLSizeMake(mtlConvertState.threadExecutionWidth, 1, 1)];
+ 				}
+             } else if (drawIdx == 0 && needsInstanceAdjustment) {
+@@ -1025,13 +1082,13 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 				state.bindBuffer(mtlConvertEncoder, indirectBuffer,                indirectBufferOffset,      0);
+ 				state.bindBuffer(mtlConvertEncoder, tempIndirectBuff->_mtlBuffer, tempIndirectBuff->_offset, 1);
+ 				state.bindStructBytes(mtlConvertEncoder, &indirectBufferStride,     2);
+-				state.bindStructBytes(mtlConvertEncoder, &_drawCount,               3);
++				state.bindStructBytes(mtlConvertEncoder, &drawCount,               3);
+ 				state.bindStructBytes(mtlConvertEncoder, &viewCount,                4);
+                 if (mtlFeats.nonUniformThreadgroups) {
+-					[mtlConvertEncoder dispatchThreads: MTLSizeMake(_drawCount, 1, 1)
++					[mtlConvertEncoder dispatchThreads: MTLSizeMake(drawCount, 1, 1)
+ 					             threadsPerThreadgroup: MTLSizeMake(mtlConvertState.threadExecutionWidth, 1, 1)];
+                 } else {
+-                    [mtlConvertEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(_drawCount, mtlConvertState.threadExecutionWidth), 1, 1)
++                    [mtlConvertEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(drawCount, mtlConvertState.threadExecutionWidth), 1, 1)
+                                       threadsPerThreadgroup: MTLSizeMake(mtlConvertState.threadExecutionWidth, 1, 1)];
+                 }
+                 // Switch back to rendering now, since we don't have compute stages to run anyway.
+@@ -1224,14 +1281,18 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 	id<MTLBuffer> indirectBuffer = _mtlIndirectBuffer;
+ 	VkDeviceSize indirectBufferOffset = _mtlIndirectBufferOffset;
+ 	uint32_t indirectBufferStride = _mtlIndirectBufferStride;
++	// Downstream change: this count is the only one used below, so every buffer matches the dispatch that writes it.
++	uint32_t drawCount = _drawCount;
+ 	if (_mtlCountBuffer && _drawCount > 0) {
++		drawCount = cappedIndirectDrawCount(cmdEncoder->getMTLDevice(), _drawCount);
+ 		auto* convertedBuffer = encodeIndirectCountConversion(cmdEncoder,
+ 				indirectBuffer,
+ 				indirectBufferOffset,
+ 				indirectBufferStride,
+ 				_mtlCountBuffer,
+ 				_mtlCountBufferOffset,
+-				_drawCount,
++				drawCount,
++				drawCount < _drawCount,
+ 				true);
+ 		indirectBuffer = convertedBuffer->_mtlBuffer;
+ 		indirectBufferOffset = convertedBuffer->_offset;
+@@ -1256,7 +1317,7 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 			indirectBuffer,
+ 			indirectBufferOffset,
+ 			indirectBufferStride,
+-			_drawCount,
++			drawCount,
+ 			true);
+ 
+ 	MVKVertexAdjustments vtxAdjmts{};
+@@ -1303,9 +1364,9 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+         outControlPointCount = pipeline->getOutputControlPointCount();
+         vertexCount = kMVKMaxDrawIndirectVertexCount;
+         patchCount = mvkCeilingDivide(vertexCount, inControlPointCount);
+-        VkDeviceSize indirectSize = (sizeof(MTLDispatchThreadgroupsIndirectArguments) + sizeof(MTLDrawPatchIndirectArguments) + sizeof(MTLStageInRegionIndirectArguments)) * _drawCount;
++        VkDeviceSize indirectSize = (sizeof(MTLDispatchThreadgroupsIndirectArguments) + sizeof(MTLDrawPatchIndirectArguments) + sizeof(MTLStageInRegionIndirectArguments)) * drawCount;
+ 		paramsIncr = std::max((size_t)dvcLimits.minUniformBufferOffsetAlignment, sizeof(uint32_t) * 2);
+-		VkDeviceSize paramsSize = paramsIncr * _drawCount;
++		VkDeviceSize paramsSize = paramsIncr * drawCount;
+         tempIndirectBuff = cmdEncoder->getTempMTLBuffer(indirectSize, true);
+         mtlIndBuff = tempIndirectBuff->_mtlBuffer;
+         mtlTempIndBuffOfst = tempIndirectBuff->_offset;
+@@ -1335,7 +1396,7 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+         }
+     } else if (vtxAdjmts.needsAdjustment()) {
+         // In this case, we need to adjust the instance count for the views being drawn.
+-        VkDeviceSize indirectSize = sizeof(MTLDrawIndexedPrimitivesIndirectArguments) * _drawCount;
++        VkDeviceSize indirectSize = sizeof(MTLDrawIndexedPrimitivesIndirectArguments) * drawCount;
+         tempIndirectBuff = cmdEncoder->getTempMTLBuffer(indirectSize, true);
+         mtlIndBuff = tempIndirectBuff->_mtlBuffer;
+         mtlTempIndBuffOfst = tempIndirectBuff->_offset;
+@@ -1350,14 +1411,14 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+     pipeline->getStages(stages);
+ 
+     if (pipeline->needsDrawIdBuffer()) {
+-        tempDrawIDBuff = cmdEncoder->getTempMTLBuffer(_drawCount * sizeof(uint32_t));
++        tempDrawIDBuff = cmdEncoder->getTempMTLBuffer(drawCount * sizeof(uint32_t));
+ 
+         auto* drawIDs = (uint32_t*)((char*)[tempDrawIDBuff->_mtlBuffer contents] + tempDrawIDBuff->_offset);
+-        for (uint32_t i = 0; i < _drawCount; i++) {
++        for (uint32_t i = 0; i < drawCount; i++) {
+             drawIDs[i] = i;
+         }
+     }
+-    for (uint32_t drawIdx = 0; drawIdx < _drawCount; drawIdx++) {
++    for (uint32_t drawIdx = 0; drawIdx < drawCount; drawIdx++) {
+         for (uint32_t s : stages) {
+             auto stage = MVKGraphicsStage(s);
+             id<MTLComputeCommandEncoder> mtlTessCtlEncoder = nil;
+@@ -1378,11 +1439,11 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+                     state.bindStructBytes(mtlTessCtlEncoder, &indirectBufferStride,     3);
+                     state.bindStructBytes(mtlTessCtlEncoder, &inControlPointCount,      4);
+                     state.bindStructBytes(mtlTessCtlEncoder, &outControlPointCount,     5);
+-                    state.bindStructBytes(mtlTessCtlEncoder, &_drawCount,               6);
++                    state.bindStructBytes(mtlTessCtlEncoder, &drawCount,               6);
+                     state.bindStructBytes(mtlTessCtlEncoder, &vtxThreadExecWidth,       7);
+                     state.bindStructBytes(mtlTessCtlEncoder, &tcWorkgroupSize,          8);
+                     state.bindStructBytes(mtlTessCtlEncoder, &vertexCount,              9);	// Downstream change: clamp bound for the kernel
+-                    [mtlTessCtlEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(_drawCount, mtlConvertState.threadExecutionWidth), 1, 1)
++                    [mtlTessCtlEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(drawCount, mtlConvertState.threadExecutionWidth), 1, 1)
+                                       threadsPerThreadgroup: MTLSizeMake(mtlConvertState.threadExecutionWidth, 1, 1)];
+                 }
+                 // We actually need to make a copy of the index buffer, because there's no way to tell Metal to
+@@ -1410,16 +1471,16 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+ 				state.bindBuffer(mtlConvertEncoder, indirectBuffer,                indirectBufferOffset,      0);
+ 				state.bindBuffer(mtlConvertEncoder, tempIndirectBuff->_mtlBuffer, tempIndirectBuff->_offset, 1);
+ 				state.bindStructBytes(mtlConvertEncoder, &indirectBufferStride,     2);
+-				state.bindStructBytes(mtlConvertEncoder, &_drawCount,               3);
++				state.bindStructBytes(mtlConvertEncoder, &drawCount,               3);
+ 				state.bindStructBytes(mtlConvertEncoder, &viewCount,                4);
+ 				state.bindStructBytes(mtlConvertEncoder, &vtxAdjmts,                5);
+ 				state.bindBuffer(mtlConvertEncoder, ibb.mtlBuffer,       ibb.offset,       6);
+ 				state.bindBuffer(mtlConvertEncoder, ibbTriFan.mtlBuffer, ibbTriFan.offset, 7);
+ 				if (mtlFeats.nonUniformThreadgroups) {
+-					[mtlConvertEncoder dispatchThreads: MTLSizeMake(_drawCount, 1, 1)
++					[mtlConvertEncoder dispatchThreads: MTLSizeMake(drawCount, 1, 1)
+ 								 threadsPerThreadgroup: MTLSizeMake(mtlConvertState.threadExecutionWidth, 1, 1)];
+ 				} else {
+-					[mtlConvertEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(_drawCount, mtlConvertState.threadExecutionWidth), 1, 1)
++					[mtlConvertEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(drawCount, mtlConvertState.threadExecutionWidth), 1, 1)
+ 									  threadsPerThreadgroup: MTLSizeMake(mtlConvertState.threadExecutionWidth, 1, 1)];
+ 				}
+ 				// Switch back to rendering now, since we don't have compute stages to run anyway.
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandPipelineStateFactoryShaderSource.h b/MoltenVK/MoltenVK/Commands/MVKCommandPipelineStateFactoryShaderSource.h
+index 60452409..15a12e62 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandPipelineStateFactoryShaderSource.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandPipelineStateFactoryShaderSource.h
+@@ -300,7 +300,10 @@ kernel void cmdDrawIndirectCountConvertBuffers(const device char* srcBuff [[buff
+                                                constant uint32_t& srcStride [[buffer(2)]],
+                                                constant uint32_t& drawCount [[buffer(3)]],
+                                                const device uint32_t* countBuff [[buffer(4)]],
++                                               device atomic_uint* truncations [[buffer(5)]],	// Downstream change: see MVKCmdDraw.mm
++                                               constant uint32_t& isCapped [[buffer(6)]],
+                                                uint idx [[thread_position_in_grid]]) {
++	if (idx == 0 && isCapped && countBuff[0] > drawCount) { atomic_fetch_add_explicit(truncations, 1, memory_order_relaxed); }
+ 	if (idx >= drawCount) { return; }
+ 	const device auto& src = *reinterpret_cast<const device MTLDrawPrimitivesIndirectArguments*>(srcBuff + idx * srcStride);
+ 	destBuff[idx] = src;
+@@ -350,7 +353,10 @@ kernel void cmdDrawIndexedIndirectCountConvertBuffers(const device char* srcBuff
+                                                       constant uint32_t& srcStride [[buffer(2)]],
+                                                       constant uint32_t& drawCount [[buffer(3)]],
+                                                       const device uint32_t* countBuff [[buffer(4)]],
++                                                      device atomic_uint* truncations [[buffer(5)]],	// Downstream change: see MVKCmdDraw.mm
++                                                      constant uint32_t& isCapped [[buffer(6)]],
+                                                       uint idx [[thread_position_in_grid]]) {
++	if (idx == 0 && isCapped && countBuff[0] > drawCount) { atomic_fetch_add_explicit(truncations, 1, memory_order_relaxed); }
+ 	if (idx >= drawCount) { return; }
+ 	const device auto& src = *reinterpret_cast<const device MTLDrawIndexedPrimitivesIndirectArguments*>(srcBuff + idx * srcStride);
+ 	destBuff[idx] = src;
