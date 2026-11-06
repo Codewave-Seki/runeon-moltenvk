@@ -18,8 +18,8 @@ A patched [MoltenVK](https://github.com/KhronosGroup/MoltenVK): a pinned upstrea
 |---|---|
 | `base/` | Pinned upstream repository and commit |
 | `patchsets/<id>/` | `series` and `manifest.json` for one patch set; scripts use the newest unless `MOLTENVK_PATCHSET_DEFINITION=patchsets/<id>` selects another |
-| `patches/community/`, `patches/downstream/` | Fixes adopted from public forks, and changes written here, one commit per file |
-| `scripts/` | Fetch, apply, check and build scripts |
+| `patches/community/` | Fixes adopted from public forks, one commit per file |
+| `scripts/` | Fetch, check and build scripts |
 | `docs/` | Review records |
 
 ## What the patches do
@@ -30,7 +30,7 @@ Every change is generic and on by default, and never matches a game. Each non-tr
 - Size tessellation scratch buffers from what shaders write, and clamp indirect tessellated draws to them
 - Keep compute-sourced barriers inside the compute encoder, and run `vkCmdDispatch` encoders concurrently where barriers are honoured
 - Let Metal optimize precise-math helpers in fragment and compute stages
-- Cap the Metal draws encoded per indirect-count command, raising the cap when draws are truncated
+- Cap the Metal draws encoded per indirect-count command with a very large declared maximum, raising the cap when draws are truncated; a one-shot command above the threshold can lose draws
 - Convert indirect-count arguments before dynamic rendering begins
 
 ## Verify and build

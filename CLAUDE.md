@@ -13,12 +13,7 @@ Conventions for working in this public repository, complete on their own. `AGENT
 
 This repository holds a pinned MoltenVK baseline plus an ordered patch series, manifests and scripts. It never holds a MoltenVK source tree or a built dylib.
 
-Describe it only as a patched MoltenVK. Write every commit, patch, manifest entry and document in English, for an outside reader:
-
-- Say nothing about who uses this library or how: no products, architecture, runtime layout, distribution, services, accounts or secrets.
-- Do not include diagnostics, logs, user data, internal task numbers or machine-specific paths such as home directories. `static-check.sh` rejects the ones it can recognise.
-- Testing notes stay generic: the hardware, the macOS version, and "under Wine and Rosetta 2 on Apple Silicon".
-- A game may be named in a rationale, with public URLs. Code never matches a game name, AppID or executable name.
+Everything here is public: patched-MoltenVK content only, no private information. Write every commit, patch, manifest entry and document in English, for an outside reader. A game may be named in a rationale, with public URLs; code never matches a game name, AppID or executable name.
 
 ## 2. Layout
 
@@ -27,7 +22,6 @@ Describe it only as a patched MoltenVK. Write every commit, patch, manifest entr
 | `base/<baseId>.json` | Pinned upstream repository, tag (or `null`) and commit; each patch set names its base |
 | `patchsets/<patch-set-id>/{series,manifest.json}` | One definition per patch set |
 | `patches/community/01NN-<slug>.patch` | Fixes adopted from public forks, keeping the original author |
-| `patches/downstream/01NN-<slug>.patch` | Changes written here; numbered in the same series |
 | `docs/upstream-reviews.md` | Review records |
 | `scripts/` | Bash tools; all load `scripts/common.sh` |
 | `.githooks/commit-msg` | Rejects commit messages that are not English |
@@ -38,7 +32,7 @@ Scripts use the newest patch set unless `MOLTENVK_PATCHSET_DEFINITION=patchsets/
 
 - A patch-set ID is `<last upstream release>-patched.<N>`, for example `1.4.2-patched.1`. `N` only increases.
 - A base may pin a tag or, when upstream has unreleased fixes that are needed, a commit on upstream `main`: `base/moltenvk-main-<short commit>.json` with `"tag": null`. The patch-set ID keeps the version of the last upstream release. The source's own version constant may already be higher: at `5189f8de` it says 1.4.3, because upstream raises it right after a release and `v1.4.3` is not released.
-- A base pins dependencies only through MoltenVK's own `ExternalRevisions` directory, fetched by its `./fetchDependencies`.
+- Dependencies are pinned only by the `ExternalRevisions` directory of the base commit, fetched by its `./fetchDependencies`.
 - A patch set's `resultTree` is the Git tree of the base after its whole series is applied. It is the patch set's identity check: recompute it after every series change.
 
 ## 4. What may enter a patch set
@@ -55,7 +49,7 @@ Scripts use the newest patch set unless `MOLTENVK_PATCHSET_DEFINITION=patchsets/
 MoltenVK is Apache-2.0 and so is everything here:
 
 - Retain all upstream notices, and keep `LICENSE` identical to MoltenVK's.
-- A new file carries an Apache header.
+- A source file added by a patch carries an Apache header.
 - A modified file has a prominent modification notice: a one-line comment at the change (`Downstream change`), plus the commit message.
 
 ## 6. Code in patches
@@ -68,7 +62,7 @@ MoltenVK is Apache-2.0 and so is everything here:
 ## 7. Patch files and manifests
 
 - Each patch is one commit in `git format-patch` form and must apply with `git am` and no conflict on top of the base plus every earlier entry.
-- Keep `series` order and manifest `order` identical. Every entry records `order`, `path`, `sha256`, `kind` (`community` or `downstream`), `author` and `summary`. Community entries also record `sourceUrl` and full `sourceCommits`.
+- Keep `series` order and manifest `order` identical. Every entry records `order`, `path`, `sha256`, `kind` (`community`), `author`, `summary`, `sourceUrl` and full `sourceCommits`.
 - After editing a patch, update its `sha256` and the patch set's `resultTree`. Never edit a patch or manifest of a tagged patch set.
 
 ## 8. Validation and evidence
@@ -88,7 +82,7 @@ These checks prove that the series applies and produces the recorded tree, nothi
 
 ## 9. Documentation
 
-- The root holds only the READMEs, `BUILDING.md`, `MAINTENANCE.md`, `SECURITY.md`, this file and its `AGENTS.md` symlink. `docs/` holds only `upstream-reviews.md`. `static-check.sh` rejects anything else.
+- The root holds only the READMEs, `BUILDING.md`, `MAINTENANCE.md`, `SECURITY.md`, this file and its `AGENTS.md` symlink. `docs/` holds only `upstream-reviews.md`.
 - Only the README is translated. `README.md` is authoritative; `README.zh-CN.md` and `README.ja.md` are complete translations, updated in the same commit.
 - A new review is a new section at the end of `docs/upstream-reviews.md`, with an `<a id>` anchor, and one row of the table in `MAINTENANCE.md`.
 

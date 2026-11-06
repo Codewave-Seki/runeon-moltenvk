@@ -18,8 +18,8 @@
 |---|---|
 | `base/` | 固定的上游仓库和提交 |
 | `patchsets/<id>/` | 一个补丁集的 `series` 和 `manifest.json`；脚本默认使用最新的，可用 `MOLTENVK_PATCHSET_DEFINITION=patchsets/<id>` 选择其他补丁集 |
-| `patches/community/`、`patches/downstream/` | 取自公开 fork 的修复和在此编写的改动，每个文件一个提交 |
-| `scripts/` | 获取、应用、检查和构建脚本 |
+| `patches/community/` | 取自公开 fork 的修复，每个文件一个提交 |
+| `scripts/` | 获取、检查和构建脚本 |
 | `docs/` | 审查记录 |
 
 ## 补丁的作用
@@ -30,7 +30,7 @@
 - 按着色器实际写入的大小确定细分暂存缓冲区，并把间接细分绘制限制在其范围内
 - 让源为 compute 的屏障留在 compute 编码器内，并在屏障得到遵守时让 `vkCmdDispatch` 编码器并发运行
 - 让 Metal 优化片段和 compute 阶段中的精确数学辅助函数
-- 限制每条 indirect-count 命令编码的 Metal 绘制数，发生截断时提高上限
+- 对声明最大值很大的 indirect-count 命令限制编码的 Metal 绘制数，发生截断时提高上限；超过阈值的一次性命令可能丢失绘制
 - 在动态渲染开始前转换 indirect-count 参数
 
 ## 验证与构建
