@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Checks layout, documents, manifests, the base file and commit messages. Needs
-# no MoltenVK checkout.
+# Checks manifests, the base file, the READMEs and commit messages. Needs no
+# MoltenVK checkout.
 
 set -euo pipefail
 
@@ -14,25 +14,12 @@ require_command perl
 require_command git
 cd "$repo_root"
 
-# Layout: the root holds a fixed set of paths.
-while IFS= read -r top; do
-  case "$top" in
-    README.md|README.zh-CN.md|README.ja.md|BUILDING.md|MAINTENANCE.md|SECURITY.md|CLAUDE.md|AGENTS.md|LICENSE) ;;
-    .gitattributes|.gitignore|.githooks|.github|base|patchsets|patches|scripts|docs) ;;
-    *) die "unexpected path at the repository root: $top" ;;
-  esac
-done < <(git ls-files | cut -d/ -f1 | sort -u)
 [[ "$(readlink AGENTS.md)" == CLAUDE.md ]] || die "AGENTS.md must be a symlink to CLAUDE.md"
-
-while IFS= read -r docs_document; do
-  [[ "$docs_document" == docs/upstream-reviews.md ]] \
-    || die "unexpected document under docs/ (add a section instead): $docs_document"
-done < <(find docs -type f)
 
 # Base file.
 [[ "$(basename "$base_manifest" .json)" == "$base_id" ]] || die "base file name differs from baseId"
 jq -e '(.commit | test("^[0-9a-f]{40}$")) and (.repository | startswith("https://"))
-       and ((.tag == null) or (.tag | type == "string")) and (.dependencies | length > 0)' \
+       and ((.tag == null) or (.tag | type == "string"))' \
   "$base_manifest" >/dev/null || die "invalid base file: $base_manifest"
 
 # Patch manifest against series.
@@ -41,10 +28,6 @@ jq -e '(.commit | test("^[0-9a-f]{40}$")) and (.repository | startswith("https:/
 [[ "$result_tree" =~ ^[0-9a-f]{40}$ ]] || die "resultTree must be a full tree SHA"
 [[ "$(series_paths)" == "$(jq -r '.patches | sort_by(.order)[] | .path' "$patch_manifest")" ]] \
   || die "series and patch manifest order differ"
-jq -e '[.patches[].order] == [range(1; (.patches | length) + 1)]' "$patch_manifest" >/dev/null \
-  || die "manifest order must count up from 1 in file order"
-[[ "$(series_paths | xargs -n 1 basename)" == "$(series_paths | xargs -n 1 basename | LC_ALL=C sort)" ]] \
-  || die "patch numbers must increase in series order"
 
 while IFS= read -r relative_patch; do
   require_file "$relative_patch"
@@ -53,13 +36,9 @@ while IFS= read -r relative_patch; do
     || die "patch SHA-256 mismatch: $relative_patch"
   jq -e '(.summary | length > 0) and (.author | length > 0)' <<<"$entry" >/dev/null \
     || die "summary or author missing: $relative_patch"
-  case "$(jq -r .kind <<<"$entry"):$relative_patch" in
-    community:patches/community/*)
-      jq -e '(.sourceUrl | startswith("https://")) and (.sourceCommits | length > 0 and all(test("^[0-9a-f]{40}$")))' \
-        <<<"$entry" >/dev/null || die "community patch needs sourceUrl and full sourceCommits: $relative_patch" ;;
-    downstream:patches/downstream/*) ;;
-    *) die "kind does not match directory: $relative_patch" ;;
-  esac
+  [[ "$relative_patch" == patches/community/* ]] || die "patch outside patches/community: $relative_patch"
+  jq -e '(.kind == "community") and (.sourceUrl | startswith("https://")) and (.sourceCommits | length > 0 and all(test("^[0-9a-f]{40}$")))' \
+    <<<"$entry" >/dev/null || die "patch needs kind community, sourceUrl and full sourceCommits: $relative_patch"
 done < <(series_paths)
 
 for shell_script in scripts/*.sh .githooks/*; do

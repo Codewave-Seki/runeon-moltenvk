@@ -7,6 +7,8 @@ on:
       - "patches/**"
       - "patchsets/**"
       - "scripts/build.sh"
+      - "scripts/common.sh"
+      - "scripts/fetch-source.sh"
       - ".github/workflows/build.yml"
   workflow_dispatch:
 

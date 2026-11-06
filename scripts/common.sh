@@ -5,7 +5,7 @@ umask 022
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
-work_root="${MOLTENVK_WORK_ROOT:-$repo_root/.work}"
+work_root="$repo_root/.work"
 # The newest patch set unless MOLTENVK_PATCHSET_DEFINITION selects another.
 patchset_definition="${MOLTENVK_PATCHSET_DEFINITION:-}"
 if [[ -z "$patchset_definition" ]]; then
@@ -62,7 +62,6 @@ load_manifests() {
 
   base_id="$(json_value "$base_manifest" '.baseId')"
   base_repository="$(json_value "$base_manifest" '.repository')"
-  base_tag="$(jq -r '.tag // empty' "$base_manifest")"
   base_commit="$(json_value "$base_manifest" '.commit')"
   patch_set_id="$(json_value "$patch_manifest" '.patchSetId')"
   result_tree="$(json_value "$patch_manifest" '.resultTree')"
