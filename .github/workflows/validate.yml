@@ -1,0 +1,18 @@
+name: Validate patch metadata
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the commit message check reads the whole history
+      - name: Validate manifests, patch hashes, documents and commit messages of every patch set
+        run: for d in patchsets/*/; do MOLTENVK_PATCHSET_DEFINITION="${d%/}" scripts/static-check.sh; done

@@ -1,0 +1,34 @@
+name: Apply patch series
+
+on:
+  push:
+    paths:
+      - "base/**"
+      - "patches/**"
+      - "patchsets/**"
+      - "scripts/**"
+      - ".github/workflows/integration.yml"
+  pull_request:
+    paths:
+      - "base/**"
+      - "patches/**"
+      - "patchsets/**"
+      - "scripts/**"
+      - ".github/workflows/integration.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apply-series:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the pinned MoltenVK base
+        id: source
+        run: |
+          root="$(scripts/fetch-source.sh)"
+          echo "root=$root" >> "$GITHUB_OUTPUT"
+      - name: Apply the newest patch set and check its tree
+        run: scripts/integration-check.sh "${{ steps.source.outputs.root }}"

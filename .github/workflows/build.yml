@@ -1,0 +1,23 @@
+name: Build dylib
+
+on:
+  push:
+    paths:
+      - "base/**"
+      - "patches/**"
+      - "patchsets/**"
+      - "scripts/build.sh"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build libMoltenVK.dylib for x86_64 and arm64
+        run: scripts/build.sh
