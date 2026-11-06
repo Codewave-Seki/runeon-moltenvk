@@ -33,14 +33,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm      | 43 ++++++++++++++++---
  MoltenVK/MoltenVK/Commands/MVKCmdPipeline.h   |  3 ++
  MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm  | 13 ++++++
- MoltenVK/MoltenVK/Commands/MVKCmdRendering.h  |  3 ++
+ MoltenVK/MoltenVK/Commands/MVKCmdRendering.h  |  2 +
  MoltenVK/MoltenVK/Commands/MVKCommand.h       | 13 ++++++
  MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h | 20 +++++++++
  .../MoltenVK/Commands/MVKCommandBuffer.mm     | 14 ++++++
- 8 files changed, 104 insertions(+), 7 deletions(-)
+ 8 files changed, 103 insertions(+), 7 deletions(-)
 
 diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.h b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.h
-index 687d1fcc..33c0d2ac 100644
+index 12d81250..96d9139f 100644
 --- a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.h
 +++ b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.h
 @@ -162,6 +162,7 @@ public:
@@ -60,10 +60,10 @@ index 687d1fcc..33c0d2ac 100644
  protected:
  	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
 diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
-index 3b92dce1..268b6228 100644
+index 081e8c95..593fd5d3 100644
 --- a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
 +++ b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
-@@ -702,11 +702,12 @@ static uint32_t cappedIndirectDrawCount(id<MTLDevice> mtlDevice, uint32_t maxDra
+@@ -706,11 +706,12 @@ static uint32_t cappedIndirectDrawCount(id<MTLDevice> mtlDevice, uint32_t maxDra
  		VkDeviceSize countBufferOffset,
  		uint32_t drawCount,
  		bool isCapped,
@@ -78,7 +78,7 @@ index 3b92dce1..268b6228 100644
  	auto* computeEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseDrawIndirectConvertBuffers);
  	MVKMetalComputeCommandEncoderState& state = cmdEncoder->getMtlCompute();
  	id<MTLComputePipelineState> pipeline = cmdEncoder->getCommandEncodingPool()->getCmdDrawIndirectCountConvertBuffersMTLComputePipelineState(indexed);
-@@ -730,7 +731,7 @@ static uint32_t cappedIndirectDrawCount(id<MTLDevice> mtlDevice, uint32_t maxDra
+@@ -734,7 +735,7 @@ static uint32_t cappedIndirectDrawCount(id<MTLDevice> mtlDevice, uint32_t maxDra
  		[computeEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(drawCount, threadWidth), 1, 1)
  						  threadsPerThreadgroup: MTLSizeMake(threadWidth, 1, 1)];
  	}
@@ -87,7 +87,7 @@ index 3b92dce1..268b6228 100644
  	return convertedBuffer;
  }
  
-@@ -917,6 +918,15 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+@@ -921,6 +922,15 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
  	diiCmd.encode(cmdEncoder, ibb);
  }
  
@@ -103,7 +103,7 @@ index 3b92dce1..268b6228 100644
  void MVKCmdDrawIndirect::encode(MVKCommandEncoder* cmdEncoder) {
  
  	cmdEncoder->restartMetalRenderPassIfNeeded();
-@@ -927,8 +937,12 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+@@ -931,8 +941,12 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
  	// Downstream change: this count is the only one used below, so every buffer matches the dispatch that writes it.
  	uint32_t drawCount = _drawCount;
  	if (_mtlCountBuffer && _drawCount > 0) {
@@ -118,7 +118,7 @@ index 3b92dce1..268b6228 100644
  				indirectBuffer,
  				indirectBufferOffset,
  				indirectBufferStride,
-@@ -937,6 +951,7 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+@@ -941,6 +955,7 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
  				drawCount,
  				drawCount < _drawCount,
  				false);
@@ -126,7 +126,7 @@ index 3b92dce1..268b6228 100644
  		indirectBuffer = convertedBuffer->_mtlBuffer;
  		indirectBufferOffset = convertedBuffer->_offset;
  		indirectBufferStride = sizeof(MTLDrawPrimitivesIndirectArguments);
-@@ -1271,6 +1286,15 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+@@ -1275,6 +1290,15 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
  	return VK_SUCCESS;
  }
  
@@ -142,7 +142,7 @@ index 3b92dce1..268b6228 100644
  void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder) {
  	cmdEncoder->restartMetalRenderPassIfNeeded();
  	encode(cmdEncoder, cmdEncoder->getVkGraphics()._indexBuffer);
-@@ -1284,8 +1308,12 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+@@ -1288,8 +1312,12 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
  	// Downstream change: this count is the only one used below, so every buffer matches the dispatch that writes it.
  	uint32_t drawCount = _drawCount;
  	if (_mtlCountBuffer && _drawCount > 0) {
@@ -157,7 +157,7 @@ index 3b92dce1..268b6228 100644
  				indirectBuffer,
  				indirectBufferOffset,
  				indirectBufferStride,
-@@ -1294,6 +1322,7 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
+@@ -1298,6 +1326,7 @@ static void bindIndirectZeroDivisorVertexBuffers(MVKCommandEncoder* cmdEncoder,
  				drawCount,
  				drawCount < _drawCount,
  				true);
@@ -194,7 +194,7 @@ index 5119f856..099756a9 100644
  protected:
  	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
 diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm b/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm
-index 8b899657..4a13f39e 100644
+index 24aa2b0d..e9cc9436 100644
 --- a/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm
 +++ b/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm
 @@ -111,6 +111,19 @@
@@ -218,18 +218,10 @@ index 8b899657..4a13f39e 100644
  void MVKCmdPipelineBarrier<N>::encode(MVKCommandEncoder* cmdEncoder) {
  	
 diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h b/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h
-index 142499dd..2cfd135b 100644
+index 142499dd..7c5869a2 100644
 --- a/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h
 +++ b/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h
-@@ -129,6 +129,7 @@ public:
- 						const VkSubpassEndInfo* pSubpassEndInfo);
- 
- 	void encode(MVKCommandEncoder* cmdEncoder) override;
-+	bool endsRenderPass() override { return true; }	// Downstream change: see MVKCommandEncoder::hoistIndirectCounts()
- 
- protected:
- 	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
-@@ -151,6 +152,7 @@ public:
+@@ -151,6 +151,7 @@ public:
  						const VkRenderingInfo* pRenderingInfo);
  
  	void encode(MVKCommandEncoder* cmdEncoder) override;
@@ -237,7 +229,7 @@ index 142499dd..2cfd135b 100644
  
  
  protected:
-@@ -218,6 +220,7 @@ public:
+@@ -218,6 +219,7 @@ public:
  	VkResult setContent(MVKCommandBuffer* cmdBuff);
  
  	void encode(MVKCommandEncoder* cmdEncoder) override;
@@ -246,7 +238,7 @@ index 142499dd..2cfd135b 100644
  protected:
  	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
 diff --git a/MoltenVK/MoltenVK/Commands/MVKCommand.h b/MoltenVK/MoltenVK/Commands/MVKCommand.h
-index ca029013..ff1642ce 100644
+index ca029013..f7f3a110 100644
 --- a/MoltenVK/MoltenVK/Commands/MVKCommand.h
 +++ b/MoltenVK/MoltenVK/Commands/MVKCommand.h
 @@ -67,6 +67,19 @@ public:
@@ -257,7 +249,7 @@ index ca029013..ff1642ce 100644
 +	/** True for commands that begin a dynamic rendering instance. Classic render passes encode barriers as they begin. */
 +	virtual bool beginsDynamicRendering() { return false; }
 +
-+	/** True for commands that end a Vulkan render pass. */
++	/** True for commands that end a dynamic rendering instance. */
 +	virtual bool endsRenderPass() { return false; }
 +
 +	/** True if indirect draws after this command must not be converted before the render pass. */

@@ -25,16 +25,22 @@ kMVKMaxDrawIndirectVertexCount could overflow them. The clamp now takes
 that constant. Buffer lengths are computed in NSUInteger, so a large
 reflected stride cannot wrap in 32 bits.
 
+The tess control output stride is not compared with the tess evaluation
+input size, as the vertex output stride is with the tess control input:
+the render pipeline compiler requests no reflection. They should match,
+since the evaluation stage is converted from the control stage's outputs,
+but that is unverified.
+
 MVK_PERF_TESS_REFLECTED_SIZES=0 restores the previous buffer sizes. The
 clamp has no switch: it acts only where the base writes out of bounds.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm      | 26 +++----
- ...KCommandPipelineStateFactoryShaderSource.h | 39 ++++++++---
- MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h    | 34 +++++++++-
- MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm   | 67 +++++++++++++++++--
- 4 files changed, 135 insertions(+), 31 deletions(-)
+ MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm      | 26 ++++----
+ ...KCommandPipelineStateFactoryShaderSource.h | 39 ++++++++----
+ MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h    | 33 +++++++++-
+ MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm   | 60 ++++++++++++++++---
+ 4 files changed, 127 insertions(+), 31 deletions(-)
 
 diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
 index d0452973..0c47728c 100644
@@ -237,7 +243,7 @@ index 9a72cc2a..60452409 100644
  }
  
 diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
-index e385e9bd..12f20988 100644
+index e385e9bd..bd03d7ae 100644
 --- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
 +++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
 @@ -285,6 +285,18 @@ public:
@@ -288,18 +294,18 @@ index e385e9bd..12f20988 100644
  	id<MTLComputePipelineState> newMTLComputePipelineState(MTLComputePipelineDescriptor* plDesc);
  
 +	/**
-+	 * Downstream change (not in upstream MoltenVK): before compiling, names up to 4 buffer indexes whose data size
++	 * Downstream change (not in upstream MoltenVK): before compiling, names the buffer indexes whose data size
 +	 * (size of the pointed-to type) is read from Metal's pipeline reflection.
 +	 */
-+	void setReflectedBufferIndexes(std::initializer_list<NSUInteger> indexes);
++	void setReflectedBufferIndexes(std::initializer_list<NSUInteger> indexes) { _reflectIndexes = indexes; _reflectedSizes.assign(indexes.size(), 0); }
 +
-+	/** The reflected data size of the i-th buffer index, or 0 if unknown. */
-+	NSUInteger getReflectedBufferDataSize(uint32_t i) const { return i < _reflectCount ? _reflectedSizes[i] : 0; }
++	/** The reflected data sizes, in the order of the buffer indexes, 0 if unknown. */
++	const std::vector<NSUInteger>& getReflectedBufferDataSizes() const { return _reflectedSizes; }
 +
  
  #pragma mark Construction
  
-@@ -595,9 +622,12 @@ public:
+@@ -595,9 +622,11 @@ public:
  	~MVKComputePipelineCompiler() override;
  
  protected:
@@ -307,14 +313,13 @@ index e385e9bd..12f20988 100644
 +	bool compileComplete(id<MTLComputePipelineState> pipelineState, NSError *error, MTLComputePipelineReflection* reflection = nil);
  
  	id<MTLComputePipelineState> _mtlComputePipelineState = nil;
-+	NSUInteger _reflectIndexes[4] = {};
-+	NSUInteger _reflectedSizes[4] = {};
-+	uint32_t _reflectCount = 0;
++	std::vector<NSUInteger> _reflectIndexes;
++	std::vector<NSUInteger> _reflectedSizes;
  };
  
  
 diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
-index 47bbd4fc..334eff18 100644
+index 47bbd4fc..fd85c6d8 100644
 --- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
 +++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
 @@ -516,7 +516,9 @@ static void populateResourceUsage(MVKPipelineStageResourceInfo& dst, SPIRVToMSLC
@@ -376,7 +381,7 @@ index 47bbd4fc..334eff18 100644
 +		if (pReflectedSizes) { plc->setReflectedBufferIndexes(reflectBufferIndexes); }
  		plState = plc->newMTLComputePipelineState(plDesc);	// retained
 +		if (pReflectedSizes) {
-+			for (uint32_t i = 0; i < reflectBufferIndexes.size(); i++) { pReflectedSizes[i] = plc->getReflectedBufferDataSize(i); }
++			std::copy(plc->getReflectedBufferDataSizes().begin(), plc->getReflectedBufferDataSizes().end(), pReflectedSizes);
 +		}
  		plc->destroy();
  		if ( !plState ) { _hasValidMTLPipelineStates = false; }
@@ -386,7 +391,7 @@ index 47bbd4fc..334eff18 100644
  	unique_lock<mutex> lock(_completionLock);
  
 +	MTLPipelineOption options = MTLPipelineOptionNone;
-+	if (_reflectCount) {
++	if ( !_reflectIndexes.empty() ) {
 +		if (@available(macOS 13.0, iOS 16.0, tvOS 16.0, *)) { options = MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo; }
 +	}
  	compile(lock, ^{
@@ -402,28 +407,21 @@ index 47bbd4fc..334eff18 100644
  											if (isLate) { destroy(); }
  										}];
  		}
-@@ -3077,10 +3112,28 @@ void serialize(Archive & archive, MVKCompressor<C>& comp) {
+@@ -3077,10 +3112,21 @@ void serialize(Archive & archive, MVKCompressor<C>& comp) {
  	return [_mtlComputePipelineState retain];
  }
  
 -bool MVKComputePipelineCompiler::compileComplete(id<MTLComputePipelineState> mtlComputePipelineState, NSError* compileError) {
-+void MVKComputePipelineCompiler::setReflectedBufferIndexes(std::initializer_list<NSUInteger> indexes) {
-+	_reflectCount = 0;
-+	for (NSUInteger idx : indexes) {
-+		if (_reflectCount < 4) { _reflectIndexes[_reflectCount++] = idx; }
-+	}
-+}
-+
 +bool MVKComputePipelineCompiler::compileComplete(id<MTLComputePipelineState> mtlComputePipelineState, NSError* compileError,
 +												 MTLComputePipelineReflection* reflection) {
  	lock_guard<mutex> lock(_completionLock);
  
  	_mtlComputePipelineState = [mtlComputePipelineState retain];		// retained
-+	if (reflection && _reflectCount) {
++	if (reflection && !_reflectIndexes.empty()) {
 +		if (@available(macOS 13.0, iOS 16.0, tvOS 16.0, *)) {
 +			for (id<MTLBinding> binding in reflection.bindings) {
 +				if (binding.type != MTLBindingTypeBuffer) { continue; }
-+				for (uint32_t i = 0; i < _reflectCount; i++) {
++				for (size_t i = 0; i < _reflectIndexes.size(); i++) {
 +					if (binding.index == _reflectIndexes[i]) { _reflectedSizes[i] = ((id<MTLBufferBinding>)binding).bufferDataSize; }
 +				}
 +			}

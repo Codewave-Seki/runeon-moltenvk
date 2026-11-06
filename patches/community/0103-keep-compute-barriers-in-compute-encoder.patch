@@ -25,7 +25,7 @@ vkCmdDispatch work and the device reports memory barriers.
 
 Metal does not state that memoryBarrierWithScope: covers the argument
 read of dispatchThreadgroupsWithIndirectBuffer:. A kept barrier whose
-destination includes DRAW_INDIRECT or ALL_COMMANDS therefore makes the
+destination includes DRAW_INDIRECT, ALL_GRAPHICS or ALL_COMMANDS therefore makes the
 next vkCmdDispatchIndirect end the encoder first, so it waits on the
 fence. Later indirect draws are in other encoders and already wait.
 
@@ -52,7 +52,7 @@ index 2a7eff45..5992362e 100644
      [cmdEncoder->getMTLComputeEncoder(kMVKCommandUseDispatch) dispatchThreadgroupsWithIndirectBuffer: _mtlIndirectBuffer
  																				indirectBufferOffset: _mtlIndirectBufferOffset
 diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm b/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm
-index 3e9fc79f..a2091cef 100644
+index 3e9fc79f..5428d3f8 100644
 --- a/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm
 +++ b/MoltenVK/MoltenVK/Commands/MVKCmdPipeline.mm
 @@ -160,7 +160,22 @@
@@ -70,7 +70,7 @@ index 3e9fc79f..a2091cef 100644
 +			srcStages |= mvkBarrierStagesFromPipelineStageFlags(b.srcStageMask);
 +			dstStages |= mvkBarrierStagesFromPipelineStageFlags(b.dstStageMask);
 +			touchesHost |= mvkIsAnyFlagEnabled(b.srcStageMask | b.dstStageMask, VK_PIPELINE_STAGE_HOST_BIT);
-+			coversIndirectArgs |= mvkIsAnyFlagEnabled(b.dstStageMask, VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
++			coversIndirectArgs |= mvkIsAnyFlagEnabled(b.dstStageMask, VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
 +		}
 +		keptInComputeEncoder = !_barriers.empty() && !touchesHost && cmdEncoder->tryKeepBarrierInComputeEncoder(srcStages, dstStages, coversIndirectArgs);
 +	}

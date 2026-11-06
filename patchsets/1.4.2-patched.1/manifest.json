@@ -1,13 +1,12 @@
 {
-  "schemaVersion": 1,
   "patchSetId": "1.4.2-patched.1",
   "baseId": "moltenvk-main-5189f8de",
-  "resultTree": "1885e5130ddd4543f10f2c3a26503ed767c79308",
+  "resultTree": "bdc6d3298fe7af6012baab0d3e15d034e434cc4d",
   "patches": [
     {
       "order": 1,
       "path": "patches/community/0101-present-after-present-wait.patch",
-      "sha256": "4f639a999d55f3bd71529e6aeec15cd3013f3f87b89ad361a6d35b2c3e9b8e69",
+      "sha256": "c63cd8687cc7cadd4f977c2d900f0da0671965c2b1c05431dfd2516c6d701e6b",
       "kind": "community",
       "author": "Dirk Fortmeier <d.fortmeier@gmail.com>",
       "sourceUrl": "https://github.com/fortmeier/MoltenVK/pull/1",
@@ -19,7 +18,7 @@
     {
       "order": 2,
       "path": "patches/community/0102-size-tessellation-scratch-from-reflection.patch",
-      "sha256": "2e766bf211d29f011d2e636e6460a25d9a784a90f6e6de862e3f2964cef53630",
+      "sha256": "2c463b7d773ea252cf0cc8016dd764952c40d1a00c420d0f5e298a402371b08c",
       "kind": "community",
       "author": "nivogli <224451320+nivogli@users.noreply.github.com>",
       "sourceUrl": "https://github.com/nivogli/MoltenVK",
@@ -32,7 +31,7 @@
     {
       "order": 3,
       "path": "patches/community/0103-keep-compute-barriers-in-compute-encoder.patch",
-      "sha256": "2665cf17d4584ba14d225bfe1c58efa1869d94f7cd2617cfe32a842b2d3cf850",
+      "sha256": "fd1cd9c40c78a4d68fe0fb5e6a882b5e8da5e344f8abc516eb02f3de41aec0b7",
       "kind": "community",
       "author": "nivogli <224451320+nivogli@users.noreply.github.com>",
       "sourceUrl": "https://github.com/nivogli/MoltenVK",
@@ -45,7 +44,7 @@
     {
       "order": 4,
       "path": "patches/community/0104-ignore-top-and-bottom-of-pipe-for-kept-barriers.patch",
-      "sha256": "232b2e842593dec4fd04e5b4dbdf628bdac48d414ec8919c1e76681a3025d3a5",
+      "sha256": "df0834185d03177fcdaacc14f896b5d43d7244612e97b262e403c4b00fb574c6",
       "kind": "community",
       "author": "nivogli <224451320+nivogli@users.noreply.github.com>",
       "sourceUrl": "https://github.com/nivogli/MoltenVK",
@@ -81,7 +80,7 @@
     {
       "order": 7,
       "path": "patches/community/0107-cap-indirect-count-draws.patch",
-      "sha256": "9bd295519bc6ce63b25428584f0dc0b1ac9aa0417bf262893daf6c5761375ffc",
+      "sha256": "6dad5060c27f4ae66da507b3dcfeeb17dce54de338243313525ea8d11bfc12c6",
       "kind": "community",
       "author": "nivogli <224451320+nivogli@users.noreply.github.com>",
       "sourceUrl": "https://github.com/nivogli/MoltenVK",
@@ -96,7 +95,7 @@
     {
       "order": 8,
       "path": "patches/community/0108-convert-indirect-count-before-rendering.patch",
-      "sha256": "989c2fd62b2a3b04c73211e535b3c15df007d6561030b1e798f491ee132f1919",
+      "sha256": "54d9c4233e4b3ed86bdc4de966dd428c2e0f9558abd993fccd967c56e355a8c0",
       "kind": "community",
       "author": "nivogli <224451320+nivogli@users.noreply.github.com>",
       "sourceUrl": "https://github.com/nivogli/MoltenVK",
