@@ -36,9 +36,15 @@ while IFS= read -r relative_patch; do
     || die "patch SHA-256 mismatch: $relative_patch"
   jq -e '(.summary | length > 0) and (.author | length > 0)' <<<"$entry" >/dev/null \
     || die "summary or author missing: $relative_patch"
-  [[ "$relative_patch" == patches/community/* ]] || die "patch outside patches/community: $relative_patch"
-  jq -e '(.kind == "community") and (.sourceUrl | startswith("https://")) and (.sourceCommits | length > 0 and all(test("^[0-9a-f]{40}$")))' \
-    <<<"$entry" >/dev/null || die "patch needs kind community, sourceUrl and full sourceCommits: $relative_patch"
+  if [[ "$relative_patch" == patches/community/* ]]; then
+    jq -e '(.kind == "community") and (.sourceUrl | startswith("https://")) and (.sourceCommits | length > 0 and all(test("^[0-9a-f]{40}$")))' \
+      <<<"$entry" >/dev/null || die "patch needs kind community, sourceUrl and full sourceCommits: $relative_patch"
+  elif [[ "$relative_patch" == patches/runeon/* ]]; then
+    jq -e '.kind == "runeon" and ((has("sourceUrl") or has("sourceCommits")) | not)' \
+      <<<"$entry" >/dev/null || die "patch needs kind runeon and no sourceUrl or sourceCommits: $relative_patch"
+  else
+    die "patch outside patches/community or patches/runeon: $relative_patch"
+  fi
 done < <(series_paths)
 
 for shell_script in scripts/*.sh .githooks/*; do

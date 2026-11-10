@@ -68,3 +68,86 @@ Not run locally: tessellated draws, so `0102`'s sizing and the clamp inside the 
 - `0102`: the tess control output stride is not compared with the tess evaluation input size, unlike the vertex to tess control pair, because the render pipeline compiler requests no reflection. They should match, as the evaluation stage is converted from the control stage's outputs; this is unverified.
 - `0106`: a compute shader whose output later feeds vertex positions also loses `NoContraction`; the stage cannot show this.
 - `0103`: Metal does not state whether `memoryBarrierWithScope:` covers indirect argument reads, so the patch assumes it does not and ends the encoder before such a `vkCmdDispatchIndirect`.
+
+<a id="linear-tiling-fallback-20261110"></a>
+## LINEAR-TILING-FALLBACK-20261110
+
+- Base: unchanged, `5189f8de86ec365860f63bf1da736815cfaea5cd`.
+- Patch set: `1.4.2-patched.2`, which is `1.4.2-patched.1` plus `0109`.
+- Source reviewed: [KhronosGroup/MoltenVK pull 2825](https://github.com/KhronosGroup/MoltenVK/pull/2825) by Gauthier Piarrette, one commit `982334711641ef88726a88dad7f89e774b50d74b`, open and not merged at the time of this review. It is contributed to MoltenVK under Apache-2.0; nothing was taken from other implementations of the same idea.
+
+### Why
+
+For a `VK_IMAGE_TILING_LINEAR` image that is not 2D, or has more than one mip level or array layer, `validateLinear()` fails `vkCreateImage()` with `VK_ERROR_FEATURE_NOT_PRESENT`, because Metal cannot back such a texture with linear memory. The Vulkan specification guarantees linear tiling only for a 2D image with one level and one layer and leaves anything more to `vkGetPhysicalDeviceImageFormatProperties`, so the refusal is legal, but some applications neither query nor handle it. Such an application exceeds the limits that `vkGetPhysicalDeviceImageFormatProperties` reports, which violates a valid usage rule; MoltenVK still reports those limits, so the fallback being on by default does not change anything for a correct application.
+
+### Evidence
+
+Observed on an Apple M3 Max with macOS 27.0.1. This is not a conformance statement.
+
+- Red Dead Redemption 2 under Wine, with `1.4.2-patched.1`: the MoltenVK log shows `vkCreateImage(): If tiling is VK_IMAGE_TILING_LINEAR, imageType must be VK_IMAGE_TYPE_2D` 16 times and `mipLevels must be 1` 3 times, immediately before the game crashes during its initialisation.
+- Red Dead Redemption 2 under Wine, with a build of `1.4.2-patched.2`, run on 2026-11-10: the Game Init crash at `RDR2.exe+0x6f74dc4` did not occur. No run with `MVK_CONFIG_LINEAR_TILING_FALLBACK=0` was made, so that the refusals cause the crash remains a hypothesis, now with stronger evidence.
+- Third-party, not reproduced here: the pull request reports that the same change on a 1.4.1 base took the game from never drawing a frame to playing its prologue on an Apple M1 Pro.
+- A local probe (a program that loads the dylib directly, creates `VkInstance` and `VkDevice`, and creates 16x16 `R8G8B8A8_UNORM` linear images; not committed), for both the `arm64` slice and the `x86_64` slice under Rosetta 2:
+
+| Image | `1.4.2-patched.1` | `1.4.2-patched.2` | `1.4.2-patched.2`, switch `0` |
+|---|---|---|---|
+| 2D, 1 level, 1 layer (control) | `VK_SUCCESS` | `VK_SUCCESS` | `VK_SUCCESS` |
+| 3D, depth 4 | `VK_ERROR_FEATURE_NOT_PRESENT` | `VK_SUCCESS` | `VK_ERROR_FEATURE_NOT_PRESENT` |
+| 2D, 2 levels | `VK_ERROR_FEATURE_NOT_PRESENT` | `VK_SUCCESS` | `VK_ERROR_FEATURE_NOT_PRESENT` |
+| 2D, 2 layers | `VK_ERROR_FEATURE_NOT_PRESENT` | `VK_SUCCESS` | `VK_ERROR_FEATURE_NOT_PRESENT` |
+
+With the fallback, one warning was logged for the first such image and none for the others.
+
+Not run locally: binding memory to such an image, host writes or reads through a mapping, and sampling it. Whether the game draws correctly with the fallback is not known.
+
+### Taken
+
+| Patch | Author | Source | Behaviour | Modifications |
+|---|---|---|---|---|
+| `0109` | Gauthier Piarrette | `98233471` | Linear-tiled 3D, mipmapped and array images are created with optimal tiling, with one warning | `MVK_CONFIG_LINEAR_TILING_FALLBACK` defaults to `1` instead of `0`, marked as a downstream change; `Docs/Whats_New.md` hunk dropped. The appended `MVKConfiguration` member raises the internal padding count from 4 to 8, as in the source; the `static_assert` on the size of `MVKConfiguration` holds for both architectures |
+
+### Known residuals
+
+- `0109`, from reading the code, not from a probe: for dedicated memory, MoltenVK copies between the mapping and the texture at flush and unmap. Other host-visible memory is backed by an `MTLHeap` on Apple GPUs, so the texture overlaps the mapped bytes, and host writes in linear layout give wrong pixels but stay in bounds.
+- `0109`: `vkGetImageSubresourceLayout` describes the optimal layout, not the linear one the application asked for. An application that computes offsets itself instead of asking may read or write the wrong bytes.
+
+<a id="pipeline-cache-stored-compile-failure-20261110"></a>
+## PIPELINE-CACHE-STORED-COMPILE-FAILURE-20261110
+
+- Base: unchanged, `5189f8de86ec365860f63bf1da736815cfaea5cd`.
+- Patch set: `1.4.2-patched.2`, which also gains `0201`.
+- Source: none. `0201` is a Runeon fix written for this series. No upstream issue or pull request covers it, and upstream `main` has not changed this code since the base; it is not proposed upstream.
+
+### Why
+
+`MVKPipelineCache::readData()` compiles every stored shader library while `vkCreatePipelineCache()` runs. A Metal compile failure is reported on the owner of the library, which is the pipeline cache, so one stored entry that fails to compile makes `vkCreatePipelineCache()` destroy the cache and return `VK_ERROR_INITIALIZATION_FAILED` with `VK_NULL_HANDLE`. Such an entry is stored whenever a pipeline's shader failed to compile in the run that saved the cache, because the library is cached even though its compile failed. An application that does not check the result and passes the null handle to `vkGetPipelineCacheData()` crashes in `MVKPipelineCache::writeData()`.
+
+### Evidence
+
+Observed on an Apple M3 Max with macOS 27.0.1. This is not a conformance statement.
+
+- Red Dead Redemption 2 under Wine, with `1.4.2-patched.2` before `0201`: the first start ran and saved a 72,773,057-byte pipeline cache; the log has one `Shader library compile failed` for MSL that writes `gl_CullDistance`, which its output struct does not declare. The second start, with that cache present, exited after 73 seconds with `fault in system call ... MVKPipelineCache::writeData` followed by winevulkan's assertion on `vkGetPipelineCacheData`. With the cache files moved away, the game started again.
+- The saved data begins with MoltenVK's own header: vendor `0x106b`, device `0x1b000209` and a `pipelineCacheUUID` equal to that of the build that wrote it.
+- A local probe (a program that loads the dylib directly, creates `VkInstance` and `VkDevice`, calls `vkCreatePipelineCache()` with the saved data, then `vkGetPipelineCacheData()` for the size and for the data without checking the first result; not committed, and the game data is not in this repository), for both the `arm64` slice and the `x86_64` slice under Rosetta 2. For the build with `0201`, a copy of the data had its UUID rewritten to the new build's, because the UUID follows the patched `HEAD`:
+
+| Build | Data | `vkCreatePipelineCache` | `vkGetPipelineCacheData` |
+|---|---|---|---|
+| Before `0201` | Saved data, UUID matches | `VK_ERROR_INITIALIZATION_FAILED`, `VK_NULL_HANDLE`; the same compile error logged once | `SIGSEGV` reading address `0x98` in `MVKPipelineCache::writeData` |
+| With `0201` | Saved data, UUID rewritten to match | `VK_SUCCESS`; the same compile error logged once | `VK_SUCCESS`, 72,773,057 bytes |
+| With `0201` | Saved data, UUID of the older build | `VK_SUCCESS`, data ignored | `VK_SUCCESS`, 36 bytes (header and end marker) |
+
+The written data has the input's size but not its byte order, because the cache iterates an unordered map.
+
+- Red Dead Redemption 2 under Wine, with a build of `1.4.2-patched.2` including `0201`, run on 2026-11-10: the second start, with the game's saved pipeline cache present, no longer crashed in `MVKPipelineCache::writeData`.
+
+### Taken
+
+| Patch | Author | Source | Behaviour | Modifications |
+|---|---|---|---|---|
+| `0201` | WIndFate | Runeon | After each stored entry is added, the configuration result of the cache is cleared, so a compile failure of that entry is logged but does not fail `vkCreatePipelineCache()`. A read error after the entry still fails it | Not applicable |
+
+### Known residuals
+
+- `0201`: the failed entry stays in the cache, is written out again, and is compiled again on every load. A pipeline that uses it fails as it did when it was saved.
+- The SPIR-V to MSL conversion that writes an undeclared `gl_CullDistance` is a separate defect and is not fixed here.
+- Every stored entry is still compiled while `vkCreatePipelineCache()` runs; with this cache the whole probe took 224 seconds on each slice, almost all of it in that call.

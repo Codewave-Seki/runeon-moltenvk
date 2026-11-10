@@ -4,12 +4,12 @@
 
 > 英文文档是权威版本。中文和日文文档是为方便阅读提供的完整翻译。
 
-这是一个打过补丁的 [MoltenVK](https://github.com/KhronosGroup/MoltenVK)：固定的上游提交、取自公开 fork 的有序补丁系列，以及重新构建它的脚本。它不作任何兼容性或一致性承诺。仓库不含 MoltenVK 源码树，也不含构建好的 dylib。
+这是一个打过补丁的 [MoltenVK](https://github.com/KhronosGroup/MoltenVK)：固定的上游提交、由取自公开 fork 的修复和为 Runeon 编写的修复组成的有序补丁系列，以及重新构建它的脚本。它不作任何兼容性或一致性承诺。仓库不含 MoltenVK 源码树，也不含构建好的 dylib。
 
 ## 基线与当前补丁集
 
 - 上游基线：MoltenVK `main` 的 `5189f8de`（`v1.4.2-58-g5189f8de`），固定在 [`base/moltenvk-main-5189f8de.json`](base/moltenvk-main-5189f8de.json)。依赖遵循其 `ExternalRevisions`
-- 当前补丁集：[`1.4.2-patched.1`](patchsets/1.4.2-patched.1/manifest.json)，共 8 个补丁。其 Git tag 是下游所用构建的源码依据；不提供二进制 Release。ID 保留上游最后一个发布版本；源码自身的版本常量为 1.4.3，上游尚未发布该版本
+- 当前补丁集：[`1.4.2-patched.2`](patchsets/1.4.2-patched.2/manifest.json)，共 10 个补丁。其 Git tag 是下游所用构建的源码依据；不提供二进制 Release。ID 保留上游最后一个发布版本；源码自身的版本常量为 1.4.3，上游尚未发布该版本
 - 审查记录：见 [MAINTENANCE.md](MAINTENANCE.md#review-records)
 
 ## 仓库结构
@@ -19,6 +19,7 @@
 | `base/` | 固定的上游仓库和提交 |
 | `patchsets/<id>/` | 一个补丁集的 `series` 和 `manifest.json`；脚本默认使用最新的，可用 `MOLTENVK_PATCHSET_DEFINITION=patchsets/<id>` 选择其他补丁集 |
 | `patches/community/` | 取自公开 fork 的修复，每个文件一个提交 |
+| `patches/runeon/` | 为 Runeon 编写的修复，每个都针对已在本地复现的缺陷，每个文件一个提交 |
 | `scripts/` | 获取、检查和构建脚本 |
 | `docs/` | 审查记录 |
 
@@ -32,6 +33,8 @@
 - 让 Metal 优化片段和 compute 阶段中的精确数学辅助函数
 - 对声明最大值很大的 indirect-count 命令限制编码的 Metal 绘制数，发生截断时提高上限；超过阈值的一次性命令可能丢失绘制
 - 在动态渲染开始前转换 indirect-count 参数
+- 对 Metal 无法以线性内存承载的线性 tiling 3D、多 mip 级与数组图像，改用 optimal tiling 创建，而不是让 `vkCreateImage` 失败
+- 已存储的着色器编译失败时保留 pipeline cache，而不是让 `vkCreatePipelineCache` 对 `vkGetPipelineCacheData` 返回的数据失败
 
 ## 验证与构建
 

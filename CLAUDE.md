@@ -22,6 +22,7 @@ Everything here is public: patched-MoltenVK content only, no private information
 | `base/<baseId>.json` | Pinned upstream repository, tag (or `null`) and commit; each patch set names its base |
 | `patchsets/<patch-set-id>/{series,manifest.json}` | One definition per patch set |
 | `patches/community/01NN-<slug>.patch` | Fixes adopted from public forks, keeping the original author |
+| `patches/runeon/02NN-<slug>.patch` | Fixes written for Runeon |
 | `docs/upstream-reviews.md` | Review records |
 | `scripts/` | Bash tools; all load `scripts/common.sh` |
 | `.githooks/commit-msg` | Rejects commit messages that are not English |
@@ -38,6 +39,7 @@ Scripts use the newest patch set unless `MOLTENVK_PATCHSET_DEFINITION=patchsets/
 ## 4. What may enter a patch set
 
 - A fix from a fork is adopted only after its defect or benefit has been reproduced locally on this base, and that is recorded in `docs/upstream-reviews.md`. A clean apply alone proves nothing. Forum and issue reports are leads, not evidence.
+- A Runeon-written fix is admitted only with a local reproduction of its defect, by probe or game log, recorded in `docs/upstream-reviews.md`. The other rules here apply to it too.
 - Record every review decision, including exclusions and why, in `docs/upstream-reviews.md`.
 - Keep original authorship with `git am` and the `From:` line. The commit message states the source URL, the modifications and why.
 - Rework a fork's commits into one patch per behaviour; do not carry them commit for commit.
@@ -62,7 +64,7 @@ MoltenVK is Apache-2.0 and so is everything here:
 ## 7. Patch files and manifests
 
 - Each patch is one commit in `git format-patch` form and must apply with `git am` and no conflict on top of the base plus every earlier entry.
-- Keep `series` order and manifest `order` identical. Every entry records `order`, `path`, `sha256`, `kind` (`community`), `author`, `summary`, `sourceUrl` and full `sourceCommits`.
+- Keep `series` order and manifest `order` identical. Every entry records `order`, `path`, `sha256`, `kind`, `author` and `summary`. A `community` entry also records `sourceUrl` and full `sourceCommits`; a `runeon` entry has neither.
 - After editing a patch, update its `sha256` and the patch set's `resultTree`. Never edit a patch or manifest of a tagged patch set.
 
 ## 8. Validation and evidence

@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: WIndFate <windfate@vip.qq.com>
+Date: Tue, 10 Nov 2026 18:00:00 +0900
+Subject: [PATCH] Keep a pipeline cache whose stored shader fails to compile
+
+MVKPipelineCache::readData() compiles every stored shader library while
+vkCreatePipelineCache() runs. The Metal compiler reports a failure on
+the owner of the library, which is the pipeline cache, so one entry
+that fails to compile makes vkCreatePipelineCache() destroy the cache
+and return VK_ERROR_INITIALIZATION_FAILED with VK_NULL_HANDLE.
+
+Such an entry is written whenever a pipeline's shader failed to compile
+in the run that saved the cache: the shader library is cached even
+though its compile failed. Feeding that data back, as an application
+does on its next start, then fails cache creation. Drivers on other
+platforms do not fail here, and an application that then passes the
+null handle to vkGetPipelineCacheData() crashes in
+MVKPipelineCache::writeData().
+
+Clear the configuration result after each stored entry is added. The
+compile failure is still logged, and a pipeline that uses the entry
+still fails as it did when the entry was saved. A read error after the
+entry still fails cache creation as before.
+
+This is a Runeon downstream fix, written for this patch series and not
+taken from a fork. It has no environment switch: it acts only where the
+base fails vkCreatePipelineCache(), and building without the patch
+restores the base behaviour.
+---
+ MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+index fd85c6d8..e64d6555 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -2752,6 +2752,13 @@ static void setDepthClipConfig(SPIRVToMSLConversionConfiguration& shaderConfig,
+ 					addPerformanceInterval(getPerformanceStats().pipelineCache.readPipelineCache, startTime);
+ 					slCache->addShaderLibrary(&shaderConversionConfig, resultInfo, compressedMSL);
+ 
++					// Downstream change: Metal can fail to compile a stored entry, as it failed when the
++					// entry was added. That failure is already logged, and a pipeline that uses the entry
++					// still fails as it did then. It must not fail vkCreatePipelineCache, which returns no
++					// cache, for data that vkGetPipelineCacheData returned. A later read error still fails.
++					// ponytail: the failed entry stays in the cache and is compiled again on every load.
++					clearConfigurationResult();
++
+ 					break;
+ 				}
+ 
+-- 
+2.54.0 (Apple Git-157)
+

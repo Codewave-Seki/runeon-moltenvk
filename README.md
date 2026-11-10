@@ -4,12 +4,12 @@
 
 > This English document is authoritative. The Chinese and Japanese documents are complete translations for convenience.
 
-A patched [MoltenVK](https://github.com/KhronosGroup/MoltenVK): a pinned upstream commit, an ordered patch series adopted from public forks, and the scripts that rebuild it. It makes no compatibility or conformance promise. It holds no MoltenVK source tree and no built dylib.
+A patched [MoltenVK](https://github.com/KhronosGroup/MoltenVK): a pinned upstream commit, an ordered patch series of fixes adopted from public forks and fixes written for Runeon, and the scripts that rebuild it. It makes no compatibility or conformance promise. It holds no MoltenVK source tree and no built dylib.
 
 ## Baseline and current patch set
 
 - Upstream base: MoltenVK `main` at `5189f8de` (`v1.4.2-58-g5189f8de`), pinned in [`base/moltenvk-main-5189f8de.json`](base/moltenvk-main-5189f8de.json). Dependencies follow its `ExternalRevisions`
-- Current patch set: [`1.4.2-patched.1`](patchsets/1.4.2-patched.1/manifest.json), with 8 patches. Its Git tag is the source of record for builds consumed downstream; there are no binary Releases. The ID keeps the last upstream release; the source's own version constant says 1.4.3, which upstream has not released
+- Current patch set: [`1.4.2-patched.2`](patchsets/1.4.2-patched.2/manifest.json), with 10 patches. Its Git tag is the source of record for builds consumed downstream; there are no binary Releases. The ID keeps the last upstream release; the source's own version constant says 1.4.3, which upstream has not released
 - Reviewed: see [MAINTENANCE.md](MAINTENANCE.md#review-records)
 
 ## Repository layout
@@ -19,6 +19,7 @@ A patched [MoltenVK](https://github.com/KhronosGroup/MoltenVK): a pinned upstrea
 | `base/` | Pinned upstream repository and commit |
 | `patchsets/<id>/` | `series` and `manifest.json` for one patch set; scripts use the newest unless `MOLTENVK_PATCHSET_DEFINITION=patchsets/<id>` selects another |
 | `patches/community/` | Fixes adopted from public forks, one commit per file |
+| `patches/runeon/` | Fixes written for Runeon, each for a defect reproduced locally, one commit per file |
 | `scripts/` | Fetch, check and build scripts |
 | `docs/` | Review records |
 
@@ -32,6 +33,8 @@ Every change is generic and on by default, and never matches a game. Each non-tr
 - Let Metal optimize precise-math helpers in fragment and compute stages
 - Cap the Metal draws encoded per indirect-count command with a very large declared maximum, raising the cap when draws are truncated; a one-shot command above the threshold can lose draws
 - Convert indirect-count arguments before dynamic rendering begins
+- Create linear-tiled 3D, mipmapped and array images, which Metal cannot back with linear memory, with optimal tiling instead of failing `vkCreateImage`
+- Keep a pipeline cache whose stored shader fails to compile, instead of failing `vkCreatePipelineCache` for data that `vkGetPipelineCacheData` returned
 
 ## Verify and build
 

@@ -1,0 +1,10 @@
+patches/community/0101-present-after-present-wait.patch
+patches/community/0102-size-tessellation-scratch-from-reflection.patch
+patches/community/0103-keep-compute-barriers-in-compute-encoder.patch
+patches/community/0104-ignore-top-and-bottom-of-pipe-for-kept-barriers.patch
+patches/community/0105-concurrent-dispatch-when-barriers-honoured.patch
+patches/community/0106-optimize-precise-math-in-fragment-and-compute.patch
+patches/community/0107-cap-indirect-count-draws.patch
+patches/community/0108-convert-indirect-count-before-rendering.patch
+patches/community/0109-linear-tiling-fallback.patch
+patches/runeon/0201-keep-pipeline-cache-on-stored-shader-compile-failure.patch

@@ -1,0 +1,175 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gauthier Piarrette <gauthierpiarrette@gmail.com>
+Date: Fri, 11 Sep 2026 18:03:36 +0200
+Subject: [PATCH] Create unsupported linear images as optimal instead of
+ failing
+
+Metal cannot back a 3D, mipmapped or array texture with linear memory, so
+validateLinear() fails vkCreateImage() with VK_ERROR_FEATURE_NOT_PRESENT
+for a VK_IMAGE_TILING_LINEAR image of that kind. That is allowed by the
+Vulkan specification, but some applications create such images and do
+not handle the failure. With MVK_CONFIG_LINEAR_TILING_FALLBACK, those
+three cases create the image with VK_IMAGE_TILING_OPTIMAL and log one
+warning. The other linear restrictions (depth/stencil, compressed and
+chroma-subsampled formats, multisampling, rendering where unsupported)
+are unchanged.
+
+Host access to such an image: for dedicated memory, MoltenVK copies
+between the mapping and the texture at flush and unmap. Other
+host-visible memory is backed by an MTLHeap on Apple GPUs, so the
+texture overlaps the mapped bytes, and host writes in linear layout
+give wrong pixels but stay in bounds. This is from reading the code,
+not from a probe.
+
+Adopted from https://github.com/KhronosGroup/MoltenVK/pull/2825 (commit
+982334711641ef88726a88dad7f89e774b50d74b). The member is appended to
+MVKConfiguration and the internal padding count follows (4 to 8 bytes).
+
+Modifications:
+- MVK_CONFIG_LINEAR_TILING_FALLBACK defaults to 1 instead of 0, marked
+  as a downstream change in MVKEnvironment.h, MVKImage.mm and the
+  configuration document. Setting it to 0 restores the base behaviour.
+- The Docs/Whats_New.md hunk is dropped.
+- The new member and the padding count carry a downstream notice in
+  mvk_private_api.h and MVKConfigMembers.def.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Docs/MoltenVK_Configuration_Parameters.md     | 16 +++++++++
+ MoltenVK/MoltenVK/API/mvk_private_api.h       |  2 ++
+ MoltenVK/MoltenVK/GPUObjects/MVKImage.mm      | 33 ++++++++++++-------
+ .../MoltenVK/Utility/MVKConfigMembers.def     |  5 ++-
+ MoltenVK/MoltenVK/Utility/MVKEnvironment.h    |  9 +++++
+ 5 files changed, 53 insertions(+), 12 deletions(-)
+
+diff --git a/Docs/MoltenVK_Configuration_Parameters.md b/Docs/MoltenVK_Configuration_Parameters.md
+index fdb7b9fa..e48c1d97 100644
+--- a/Docs/MoltenVK_Configuration_Parameters.md
++++ b/Docs/MoltenVK_Configuration_Parameters.md
+@@ -649,6 +649,22 @@ Determines the style used to implement _Vulkan_ semaphore (`VkSemaphore`) functi
+ In the special case of `VK_SEMAPHORE_TYPE_TIMELINE` semaphores, **MoltenVK** will always use
+ `MTLSharedEvent`, regardless of the value of this parameter.
+ 
++---------------------------------------
++#### MVK_CONFIG_LINEAR_TILING_FALLBACK
++
++##### Type: Boolean
++##### Default: `1` (downstream change; upstream proposes `0`)
++
++_Metal_ cannot back a 3D, mipmapped, or array texture with linear memory, so **MoltenVK**
++fails `vkCreateImage()` for a `VK_IMAGE_TILING_LINEAR` image of that kind. Some applications
++create such images anyway and cannot recover when the call fails. If this parameter is enabled,
++**MoltenVK** creates such an image with `VK_IMAGE_TILING_OPTIMAL` instead and logs a warning.
++Host access to the image then goes through the memory binding's flush path rather than a
++shared `MTLBuffer`, and `vkGetImageSubresourceLayout()` describes that layout. The other
++restrictions on linear images (depth/stencil, compressed and chroma-subsampled formats,
++multisampling, rendering where the device does not support it) are unchanged.
++
++
+ ---------------------------------------
+ #### MVK_CONFIG_LIVE_CHECK_ALL_RESOURCES
+ 
+diff --git a/MoltenVK/MoltenVK/API/mvk_private_api.h b/MoltenVK/MoltenVK/API/mvk_private_api.h
+index fdfa71ae..908ce9b0 100644
+--- a/MoltenVK/MoltenVK/API/mvk_private_api.h
++++ b/MoltenVK/MoltenVK/API/mvk_private_api.h
+@@ -247,6 +247,8 @@ typedef struct {
+ 	const char* shaderDumpDir;                                                 /**< MVK_CONFIG_SHADER_DUMP_DIR */
+ 	VkBool32 shaderLogEstimatedGLSL;                                           /**< MVK_CONFIG_SHADER_LOG_ESTIMATED_GLSL */
+ 	VkBool32 liveCheckAllResources;                                            /**< MVK_CONFIG_LIVE_CHECK_ALL_RESOURCES */
++	// Downstream change: from KhronosGroup/MoltenVK pull 2825, not in upstream.
++	VkBool32 linearTilingFallback;                                             /**< MVK_CONFIG_LINEAR_TILING_FALLBACK */
+ } MVKConfiguration;
+ 
+ // Legacy support for renamed struct elements.
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
+index b3bbe3b3..1ea6f3f9 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
+@@ -1440,10 +1440,27 @@ static MTLRegion getMTLRegion(const ImgRgn& imgRgn) {
+ 
+ 	bool isLin = true;
+ 
+-	if (getImageType() != VK_IMAGE_TYPE_2D) {
+-		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCreateImage() : If tiling is VK_IMAGE_TILING_LINEAR, imageType must be VK_IMAGE_TYPE_2D."));
++	// Metal cannot back a 3D, mipmapped or array texture with linear memory. With
++	// MVK_CONFIG_LINEAR_TILING_FALLBACK, such an image is created with optimal tiling instead
++	// of failing vkCreateImage: the app gets a usable image (host access goes through the
++	// memory binding's flush path rather than a shared MTLBuffer), which some engines rely on.
++	// Downstream change (not in upstream MoltenVK): the fallback is on by default; 0 restores the error.
++	bool fallback = getMVKConfig().linearTilingFallback;
++	auto unsupportedLinear = [&](const char* what) {
++		if (fallback) {
++			// An engine that wants such an image tends to want thousands of them; say it once.
++			static bool reported = false;
++			if ( !reported ) {
++				reported = true;
++				reportMessage(MVK_CONFIG_LOG_LEVEL_WARNING, "vkCreateImage() : If tiling is VK_IMAGE_TILING_LINEAR, %s; creating the image with VK_IMAGE_TILING_OPTIMAL instead (MVK_CONFIG_LINEAR_TILING_FALLBACK). Further such images are created silently.", what);
++			}
++		} else {
++			setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCreateImage() : If tiling is VK_IMAGE_TILING_LINEAR, %s.", what));
++		}
+ 		isLin = false;
+-	}
++	};
++
++	if (getImageType() != VK_IMAGE_TYPE_2D) { unsupportedLinear("imageType must be VK_IMAGE_TYPE_2D"); }
+ 
+ 	if (getPixelFormats()->getFormatType(pCreateInfo->format) == kMVKFormatDepthStencil) {
+ 		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCreateImage() : If tiling is VK_IMAGE_TILING_LINEAR, format must not be a depth/stencil format."));
+@@ -1458,15 +1475,9 @@ static MTLRegion getMTLRegion(const ImgRgn& imgRgn) {
+ 		isLin = false;
+ 	}
+ 
+-	if (pCreateInfo->mipLevels > 1) {
+-		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCreateImage() : If tiling is VK_IMAGE_TILING_LINEAR, mipLevels must be 1."));
+-		isLin = false;
+-	}
++	if (pCreateInfo->mipLevels > 1) { unsupportedLinear("mipLevels must be 1"); }
+ 
+-	if (pCreateInfo->arrayLayers > 1) {
+-		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCreateImage() : If tiling is VK_IMAGE_TILING_LINEAR, arrayLayers must be 1."));
+-		isLin = false;
+-	}
++	if (pCreateInfo->arrayLayers > 1) { unsupportedLinear("arrayLayers must be 1"); }
+ 
+ 	if (pCreateInfo->samples > VK_SAMPLE_COUNT_1_BIT) {
+ 		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCreateImage() : If tiling is VK_IMAGE_TILING_LINEAR, samples must be VK_SAMPLE_COUNT_1_BIT."));
+diff --git a/MoltenVK/MoltenVK/Utility/MVKConfigMembers.def b/MoltenVK/MoltenVK/Utility/MVKConfigMembers.def
+index 5f7e0a58..32a75a35 100644
+--- a/MoltenVK/MoltenVK/Utility/MVKConfigMembers.def
++++ b/MoltenVK/MoltenVK/Utility/MVKConfigMembers.def
+@@ -86,6 +86,8 @@ MVK_CONFIG_MEMBER(useMetalPrivateAPI,                     VkBool32,
+ MVK_CONFIG_MEMBER_STRING(shaderDumpDir,                   char*,                                    SHADER_DUMP_DIR)
+ MVK_CONFIG_MEMBER(shaderLogEstimatedGLSL,                 VkBool32,                                 SHADER_LOG_ESTIMATED_GLSL)
+ MVK_CONFIG_MEMBER(liveCheckAllResources,                  VkBool32,                                 LIVE_CHECK_ALL_RESOURCES)
++// Downstream change: from KhronosGroup/MoltenVK pull 2825, not in upstream.
++MVK_CONFIG_MEMBER(linearTilingFallback,                   VkBool32,                                 LINEAR_TILING_FALLBACK)
+ 
+ #undef MVK_CONFIG_MEMBER
+ #undef MVK_CONFIG_MEMBER_STRING
+@@ -101,5 +103,6 @@ MVK_CONFIG_MEMBER(liveCheckAllResources,                  VkBool32,
+  * Once  MVKConfiguration and the list above are in agreement, it may be necessary to modify
+  * this value if the internal padding has changed as a result of new MVKConfiguration members.
+  */
+-#define kMVKConfigurationInternalPaddingByteCount  4
++// Downstream change: from KhronosGroup/MoltenVK pull 2825, not in upstream.
++#define kMVKConfigurationInternalPaddingByteCount  8
+ 
+diff --git a/MoltenVK/MoltenVK/Utility/MVKEnvironment.h b/MoltenVK/MoltenVK/Utility/MVKEnvironment.h
+index e6d176c8..09b214e5 100644
+--- a/MoltenVK/MoltenVK/Utility/MVKEnvironment.h
++++ b/MoltenVK/MoltenVK/Utility/MVKEnvironment.h
+@@ -350,3 +350,12 @@ void mvkSetConfig(MVKConfiguration& dstMVKConfig, const MVKConfiguration& srcMVK
+ #ifndef MVK_CONFIG_LIVE_CHECK_ALL_RESOURCES
+ #   define MVK_CONFIG_LIVE_CHECK_ALL_RESOURCES 0
+ #endif
++
++/**
++ * Create linear-tiled images Metal cannot back with linear memory as optimal-tiled images instead of failing.
++ * Downstream change (not in upstream MoltenVK): enabled by default, because applications that request such
++ * images do not handle the failure; set to 0 to restore upstream behaviour.
++ */
++#ifndef MVK_CONFIG_LINEAR_TILING_FALLBACK
++#   define MVK_CONFIG_LINEAR_TILING_FALLBACK    1
++#endif

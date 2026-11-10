@@ -4,12 +4,12 @@
 
 > この英語の文書が正式版です。中国語と日本語の文書は、読みやすさのための完全な翻訳です。
 
-パッチを適用した [MoltenVK](https://github.com/KhronosGroup/MoltenVK) です。固定した上流コミット、公開フォークから採用した順序付きパッチシリーズ、そして再構築用のスクリプトで構成されます。互換性や適合性は保証しません。MoltenVK のソースツリーやビルド済み dylib は含みません。
+パッチを適用した [MoltenVK](https://github.com/KhronosGroup/MoltenVK) です。固定した上流コミット、公開フォークから採用した修正と Runeon 向けに書いた修正からなる順序付きパッチシリーズ、そして再構築用のスクリプトで構成されます。互換性や適合性は保証しません。MoltenVK のソースツリーやビルド済み dylib は含みません。
 
 ## ベースラインと現在のパッチセット
 
 - 上流ベース：MoltenVK `main` の `5189f8de`（`v1.4.2-58-g5189f8de`）。[`base/moltenvk-main-5189f8de.json`](base/moltenvk-main-5189f8de.json) に固定しています。依存関係はその `ExternalRevisions` に従います
-- 現在のパッチセット：[`1.4.2-patched.1`](patchsets/1.4.2-patched.1/manifest.json)。パッチ 8 件。その Git タグが、下流で使われるビルドのソースの正式な記録です。バイナリの Release は提供しません。ID は上流の最新リリースを保持します。ソース自体のバージョン定数は 1.4.3 ですが、上流はまだリリースしていません
+- 現在のパッチセット：[`1.4.2-patched.2`](patchsets/1.4.2-patched.2/manifest.json)。パッチ 10 件。その Git タグが、下流で使われるビルドのソースの正式な記録です。バイナリの Release は提供しません。ID は上流の最新リリースを保持します。ソース自体のバージョン定数は 1.4.3 ですが、上流はまだリリースしていません
 - レビュー：[MAINTENANCE.md](MAINTENANCE.md#review-records) を参照してください
 
 ## リポジトリ構成
@@ -19,6 +19,7 @@
 | `base/` | 固定した上流リポジトリとコミット |
 | `patchsets/<id>/` | 1 つのパッチセットの `series` と `manifest.json`。スクリプトは最新のものを使い、`MOLTENVK_PATCHSET_DEFINITION=patchsets/<id>` で別のものを選べます |
 | `patches/community/` | 公開フォークから採用した修正。1 ファイル 1 コミット |
+| `patches/runeon/` | Runeon 向けに書いた修正。いずれもローカルで再現した不具合に対するもの。1 ファイル 1 コミット |
 | `scripts/` | 取得、検査、ビルドのスクリプト |
 | `docs/` | レビュー記録 |
 
@@ -32,6 +33,8 @@
 - フラグメントと compute ステージの精密演算ヘルパーを Metal に最適化させる
 - 宣言された最大値が非常に大きい indirect-count コマンドでは、エンコードする Metal 描画数に上限を設け、切り詰めが起きたら上限を上げる。しきい値を超える単発コマンドでは描画が失われることがある
 - 動的レンダリングの開始前に indirect-count の引数を変換する
+- Metal が線形メモリで扱えない線形タイリングの 3D・ミップマップ・配列イメージを、`vkCreateImage` を失敗させる代わりに optimal タイリングで作成する
+- 保存済みシェーダーのコンパイルに失敗しても pipeline cache を保持し、`vkGetPipelineCacheData` が返したデータで `vkCreatePipelineCache` を失敗させない
 
 ## 検証とビルド
 

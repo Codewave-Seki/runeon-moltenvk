@@ -33,6 +33,10 @@ cd "$tree"
 # ponytail: an existing External/build is trusted; remove it after a base change.
 [[ -d External/build/Latest ]] || ./fetchDependencies --macos
 
+# Xcode regenerates the Git revision header, the source of pipelineCacheUUID,
+# only when it is missing, and derived data is shared across patch sets.
+find "$work_root/derived-data" -name mvkGitRevDerived.h -delete 2>/dev/null || true
+
 xcodebuild build -quiet \
   -project MoltenVKPackaging.xcodeproj \
   -scheme "MoltenVK Package (macOS only)" \
